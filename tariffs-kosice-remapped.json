@@ -1,0 +1,40 @@
+{
+  "version": "0.4.3",
+  "currency": "EUR",
+  "discounts": {
+    "app_pct": 10,
+    "bonus_card_pct": 25
+  },
+  "zones": [
+    {
+      "id": "A1",
+      "label": "Tarifné pásmo A1",
+      "base_30": 1.5,
+      "daily_cap": 24.0
+    },
+    {
+      "id": "A2",
+      "label": "Tarifné pásmo A2",
+      "base_30": 1.0,
+      "daily_cap": 16.0
+    },
+    {
+      "id": "BN",
+      "label": "Tarifné pásmo BN",
+      "base_30": 0.5,
+      "daily_cap": 6.0
+    },
+    {
+      "id": "N",
+      "label": "Tarifné pásmo N",
+      "base_30": 0.3,
+      "daily_cap": 3.0
+    },
+    {
+      "id": "B",
+      "label": "Lokalita B (rezidentská)",
+      "base_30": 0.5,
+      "daily_cap": null
+    }
+  ]
+}

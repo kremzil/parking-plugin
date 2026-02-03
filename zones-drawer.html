@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="sk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Zaparkuj – Zóny (kreslenie a export GeoJSON)</title>
+
+  <!-- Leaflet -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
+
+  <!-- Leaflet.draw -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.css">
+  <script src="https://unpkg.com/leaflet-draw@1.0.4/dist/leaflet.draw.js"></script>
+
+  <style>
+    html, body { height: 100%; margin: 0; }
+    .wrap {
+      display: grid;
+      grid-template-columns: 340px 1fr;
+      grid-template-rows: auto 1fr;
+      height: 100%;
+      font: 14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      color: #1f2937;
+    }
+    header {
+      grid-column: 1 / span 2;
+      padding: 10px 14px;
+      border-bottom: 1px solid #e5e7eb;
+      background: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+    header .btns { display: flex; gap: 8px; flex-wrap: wrap; }
+    .btn {
+      padding: 8px 12px; border: 1px solid #e5e7eb; background: #fff; border-radius: 10px; cursor: pointer;
+    }
+    .btn.primary { background: #111827; color: #fff; border-color:#111827; }
+    .btn:disabled { opacity: .6; cursor: not-allowed; }
+
+    aside {
+      background: #fafafa; border-right: 1px solid #e5e7eb; padding: 14px; overflow: auto;
+    }
+    aside h3 { margin: 6px 0 10px; font-size: 16px; }
+    aside .muted { color:#6b7280; font-size: 12px; }
+    label { display:block; font-weight:600; margin:10px 0 4px; }
+    input[type="text"], input[type="number"] {
+      width:100%; box-sizing:border-box; padding:8px 10px; border-radius:10px; border:1px solid #e5e7eb; background:#fff;
+    }
+    #map { width: 100%; height: 100%; }
+    .note { background:#f3f4f6; padding:8px 10px; border-radius:8px; }
+    .small { font-size: 12px; color:#6b7280 }
+    .hr { height:1px; background:#e5e7eb; margin:14px 0; }
+    .pill { background:#eef2ff; color:#3730a3; padding:2px 8px; border-radius:999px; font-size:12px; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <strong>Zaparkuj — kreslenie zón</strong>
+      <span class="pill">GeoJSON</span>
+    </div>
+    <div class="btns">
+      <label class="btn" style="margin:0">
+        Import GeoJSON
+        <input id="importFile" type="file" accept=".json,.geojson,application/geo+json" style="display:none">
+      </label>
+      <button id="btnExport" class="btn primary">Exportovať GeoJSON</button>
+      <button id="btnClear" class="btn">Vyčistiť všetko</button>
+    </div>
+  </header>
+
+  <aside>
+    <h3>Inštrukcie</h3>
+    <ol class="small">
+      <li>Vyber nástroj <b>Polygon</b> (ikonka vľavo hore na mape) a <b>obkresli</b> hranice zóny.</li>
+      <li>Po ukončení kreslenia zadaj <i>Zone ID</i> (napr. A, A1, B1, B2...).</li>
+      <li>Voliteľne doplň tarifu: <i>Rate / hod, Step, Min</i>.</li>
+      <li>Opakuj pre všetky zóny a klikni <b>Exportovať GeoJSON</b>.</li>
+    </ol>
+
+    <div class="hr"></div>
+
+    <h3>Vybraná zóna</h3>
+    <div class="small muted" id="selHint">Klikni na polygon v mape.</div>
+    <div id="formFields" style="display:none">
+      <label for="f_id">Zone ID (napr. A, A1, B1...)</label>
+      <input id="f_id" type="text" placeholder="A, A1, B1, ...">
+
+      <label for="f_label">Názov (label)</label>
+      <input id="f_label" type="text" placeholder="Lokalita A – centrum">
+
+      <label for="f_rate">Rate / hod (EUR)</label>
+      <input id="f_rate" type="number" step="0.01" min="0" placeholder="2.00">
+
+      <label for="f_step">Billing increment (min)</label>
+      <input id="f_step" type="number" step="1" min="1" placeholder="15">
+
+      <label for="f_min">Min charge (min)</label>
+      <input id="f_min" type="number" step="1" min="0" placeholder="30">
+    </div>
+
+    <div class="hr"></div>
+    <p class="note small">
+      Tip: ak sú hranice zložité, priblíž mapu čo najviac. Pri chybe použite <b>Edit</b> alebo <b>Delete</b> v paneli kreslenia.
+    </p>
+  </aside>
+
+  <div id="map"></div>
+</div>
+
+<script>
+  // --- Map ---
+  const map = L.map('map').setView([48.7164, 21.2611], 14); // Košice center
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; OpenStreetMap'
+  }).addTo(map);
+
+  // FeatureGroup for drawn items
+  const drawnItems = new L.FeatureGroup();
+  map.addLayer(drawnItems);
+
+  // Draw controls
+  const drawControl = new L.Control.Draw({
+    edit: { featureGroup: drawnItems },
+    draw: {
+      polygon: { allowIntersection: false, showArea: true },
+      polyline: false, circle: false, marker: false, circlemarker: false, rectangle: false
+    }
+  });
+  map.addControl(drawControl);
+
+  // UI helpers
+  const selHint = document.getElementById('selHint');
+  const formFields = document.getElementById('formFields');
+  const f_id = document.getElementById('f_id');
+  const f_label = document.getElementById('f_label');
+  const f_rate = document.getElementById('f_rate');
+  const f_step = document.getElementById('f_step');
+  const f_min = document.getElementById('f_min');
+  let selectedLayer = null;
+
+  function fillFormFromLayer(layer) {
+    const p = layer.feature && layer.feature.properties ? layer.feature.properties : {};
+    f_id.value    = p.id    || '';
+    f_label.value = p.label || '';
+    f_rate.value  = p.rate_per_hour != null ? p.rate_per_hour : '';
+    f_step.value  = p.billing_increment != null ? p.billing_increment : '';
+    f_min.value   = p.min_charge_minutes != null ? p.min_charge_minutes : '';
+  }
+
+  function saveFormToLayer(layer) {
+    layer.feature = layer.feature || { type: 'Feature', properties: {} };
+    const props = layer.feature.properties;
+    props.id = (f_id.value || '').trim();
+    props.label = (f_label.value || '').trim();
+    props.rate_per_hour = f_rate.value !== '' ? parseFloat(f_rate.value) : null;
+    props.billing_increment = f_step.value !== '' ? parseInt(f_step.value, 10) : null;
+    props.min_charge_minutes = f_min.value !== '' ? parseInt(f_min.value, 10) : null;
+  }
+
+  // Bind input listeners to update props live
+  [f_id, f_label, f_rate, f_step, f_min].forEach(el => {
+    el.addEventListener('input', () => {
+      if (selectedLayer) saveFormToLayer(selectedLayer);
+    });
+  });
+
+  // Select layer logic
+  function selectLayer(layer) {
+    selectedLayer = layer;
+    selHint.style.display = 'none';
+    formFields.style.display = 'block';
+    fillFormFromLayer(layer);
+  }
+
+  function attachLayerEvents(layer) {
+    layer.on('click', () => selectLayer(layer));
+  }
+
+  // Draw events
+  map.on(L.Draw.Event.CREATED, function (e) {
+    const layer = e.layer;
+    const id = prompt('Zone ID (napr. A, A1, B1...):', '');
+    layer.feature = { type: 'Feature', properties: { id: (id||'').trim() } };
+    drawnItems.addLayer(layer);
+    attachLayerEvents(layer);
+    selectLayer(layer);
+  });
+
+  map.on('draw:edited', function () {
+    if (selectedLayer) {
+      saveFormToLayer(selectedLayer);
+    }
+  });
+
+  map.on('draw:deleted', function () {
+    if (selectedLayer && !drawnItems.hasLayer(selectedLayer)) {
+      selectedLayer = null;
+      formFields.style.display = 'none';
+      selHint.style.display = 'block';
+    }
+  });
+
+  // Export GeoJSON
+  document.getElementById('btnExport').addEventListener('click', () => {
+    const fc = drawnItems.toGeoJSON();
+    (fc.features || []).forEach(f => {
+      f.properties = f.properties || {};
+      if (!('id' in f.properties)) f.properties.id = '';
+    });
+    if (!fc.features || !fc.features.length) {
+      alert('Nie sú žiadne zóny na export.');
+      return;
+    }
+    const blob = new Blob([JSON.stringify(fc, null, 2)], {type: 'application/geo+json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'zones.geojson';
+    a.click();
+    URL.revokeObjectURL(url);
+  });
+
+  // Import GeoJSON
+  document.getElementById('importFile').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const geo = JSON.parse(reader.result);
+        L.geoJSON(geo, {
+          onEachFeature: (_feature, layer) => {
+            drawnItems.addLayer(layer);
+            attachLayerEvents(layer);
+          }
+        });
+        try { map.fitBounds(drawnItems.getBounds(), {padding: [20,20]}); } catch(_){}
+      } catch (err) {
+        alert('Chybný GeoJSON: ' + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  });
+
+  // Clear all
+  document.getElementById('btnClear').addEventListener('click', () => {
+    if (!confirm('Naozaj vyčistiť všetky zóny?')) return;
+    drawnItems.clearLayers();
+    selectedLayer = null;
+    formFields.style.display = 'none';
+    selHint.style.display = 'block';
+  });
+</script>
+</body>
+</html>
