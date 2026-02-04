@@ -83,6 +83,9 @@ class ZP_Barion_Gateway {
       $order_number = 'ZP-' . time() . '-' . substr(md5($data['spz'] . $data['email']), 0, 6);
       
       // Сохранение данных заказа в transient (временное хранилище)
+      $lang = isset($data['lang']) ? strtolower(trim((string)$data['lang'])) : 'sk';
+      if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = 'sk';
+
       $order_data = [
         'spz' => $data['spz'],
         'email' => $data['email'],
@@ -92,7 +95,7 @@ class ZP_Barion_Gateway {
         'lng' => isset($data['lng']) ? $data['lng'] : null,
         'amount_cents' => $data['amount_cents'],
         'created_at' => current_time('mysql'),
-        'lang' => isset($data['lang']) ? $data['lang'] : 'sk'
+        'lang' => $lang
       ];
       set_transient('zp_order_' . $order_number, $order_data, 3600); // 1 час
       
@@ -132,7 +135,7 @@ class ZP_Barion_Gateway {
       
       // URL для редиректа после оплаты
       $pmt->RedirectUrl = add_query_arg(
-        ['zp_barion_callback' => '1'],
+        ['zp_barion_callback' => '1', 'lang' => $lang],
         home_url('/')
       );
       $pmt->CallbackUrl = rest_url('zaparkuj/v1/barion-ipn');
@@ -191,6 +194,41 @@ class ZP_Barion_Gateway {
         error_log('Barion response missing redirect URL. PaymentId: ' . $result->PaymentId);
         throw new Exception('Barion nevrátil redirect URL (PaymentId: ' . $result->PaymentId . ')');
       }
+
+      // Persist order data (pending) so we can still finalize + send email even if transient expires.
+      // This also makes the success flow robust if Barion callback arrives late or IPN is delayed.
+      try {
+        global $wpdb;
+        $table_transactions = $wpdb->prefix . 'zp_transactions';
+        $existing_tx = $wpdb->get_row($wpdb->prepare(
+          "SELECT id FROM $table_transactions WHERE order_number = %s LIMIT 1",
+          $order_number
+        ), ARRAY_A);
+
+        $row = [
+          'barion_payment_id' => $result->PaymentId,
+          'order_number' => $order_number,
+          'spz' => $order_data['spz'],
+          'email' => $order_data['email'],
+          'zone_id' => $order_data['zone_id'],
+          'lat' => $order_data['lat'],
+          'lng' => $order_data['lng'],
+          'minutes' => $order_data['minutes'],
+          'amount_cents' => $order_data['amount_cents'],
+          'status' => 'pending',
+          'created_at' => $order_data['created_at'],
+          'paid_at' => null,
+        ];
+
+        if ($existing_tx && isset($existing_tx['id'])) {
+          $wpdb->update($table_transactions, $row, ['id' => intval($existing_tx['id'])]);
+        } else {
+          // If insert fails (e.g., unique key), handle_successful_payment will recover by updating by payment id.
+          $wpdb->insert($table_transactions, $row);
+        }
+      } catch (Exception $e) {
+        error_log('ZP: Failed to persist pending transaction for ' . $order_number . ': ' . $e->getMessage());
+      }
       
       return [
         'success' => true,
@@ -245,71 +283,95 @@ class ZP_Barion_Gateway {
    * Обработка успешного платежа
    */
   public static function handle_successful_payment($payment_id, $order_number) {
-    // Получить сохранённые данные заказа
-    $order_data = get_transient('zp_order_' . $order_number);
-    
-    if (!$order_data) {
-      error_log('ZP: Order data not found for ' . $order_number);
-      return false;
-    }
-    
     global $wpdb;
     $table_transactions = $wpdb->prefix . 'zp_transactions';
     $table_parkings = $wpdb->prefix . 'zp_parkings';
-    
-    // Проверить, не обработан ли уже этот платеж
-    $existing = $wpdb->get_row($wpdb->prepare(
-      "SELECT id FROM $table_transactions WHERE barion_payment_id = %s",
-      $payment_id
-    ));
-    
-    if ($existing) {
-      error_log('ZP: Payment already processed: ' . $payment_id);
-      return true; // Уже обработан
+
+    // Get order data from transient first (fast path), fall back to DB (pending row) if transient expired.
+    $order_data = get_transient('zp_order_' . $order_number);
+    if (!$order_data || !is_array($order_data)) {
+      $order_data = $wpdb->get_row($wpdb->prepare(
+        "SELECT spz, email, zone_id, lat, lng, minutes, amount_cents, created_at, paid_at FROM $table_transactions WHERE order_number = %s OR barion_payment_id = %s ORDER BY id DESC LIMIT 1",
+        $order_number,
+        $payment_id
+      ), ARRAY_A);
     }
-    
-    // Сохранить транзакцию
-    $wpdb->insert($table_transactions, [
+    if (!$order_data || !is_array($order_data)) {
+      error_log('ZP: Order data not found for ' . $order_number . ' (payment ' . $payment_id . ')');
+      return false;
+    }
+
+    // Find existing transaction row for this payment/order.
+    $existing = $wpdb->get_row($wpdb->prepare(
+      "SELECT * FROM $table_transactions WHERE barion_payment_id = %s OR order_number = %s ORDER BY id DESC LIMIT 1",
+      $payment_id,
+      $order_number
+    ), ARRAY_A);
+
+    $was_completed = (is_array($existing) && (($existing['status'] ?? '') === 'completed'));
+    if ($was_completed) {
+      // Already finalized; don't create another parking or spam another email.
+      return true;
+    }
+
+    $paid_at = current_time('mysql');
+
+    // Upsert transaction as completed.
+    $tx_row = [
       'barion_payment_id' => $payment_id,
       'order_number' => $order_number,
-      'spz' => $order_data['spz'],
-      'email' => $order_data['email'],
-      'zone_id' => $order_data['zone_id'],
-      'lat' => $order_data['lat'],
-      'lng' => $order_data['lng'],
-      'minutes' => $order_data['minutes'],
-      'amount_cents' => $order_data['amount_cents'],
+      'spz' => $order_data['spz'] ?? '',
+      'email' => $order_data['email'] ?? '',
+      'zone_id' => $order_data['zone_id'] ?? '',
+      'lat' => isset($order_data['lat']) ? $order_data['lat'] : null,
+      'lng' => isset($order_data['lng']) ? $order_data['lng'] : null,
+      'minutes' => intval($order_data['minutes'] ?? 0),
+      'amount_cents' => intval($order_data['amount_cents'] ?? 0),
       'status' => 'completed',
-      'created_at' => $order_data['created_at'],
-      'paid_at' => current_time('mysql')
-    ], [
-      '%s', '%s', '%s', '%s', '%s', '%f', '%f', '%d', '%d', '%s', '%s', '%s'
-    ]);
-    
-    $transaction_id = $wpdb->insert_id;
+      'created_at' => $order_data['created_at'] ?? $paid_at,
+      'paid_at' => $paid_at,
+    ];
+
+    if (is_array($existing) && isset($existing['id'])) {
+      $wpdb->update($table_transactions, $tx_row, ['id' => intval($existing['id'])]);
+      $transaction_id = intval($existing['id']);
+    } else {
+      $wpdb->insert($table_transactions, $tx_row);
+      $transaction_id = intval($wpdb->insert_id);
+    }
     
     // Создать активную парковку
     if ($transaction_id) {
       $started_at = current_time('mysql');
       $expires_at = date('Y-m-d H:i:s', strtotime($started_at) + ($order_data['minutes'] * 60));
-      
-      $wpdb->insert($table_parkings, [
-        'transaction_id' => $transaction_id,
-        'spz' => $order_data['spz'],
-        'zone_id' => $order_data['zone_id'],
-        'started_at' => $started_at,
-        'expires_at' => $expires_at,
-        'extended_minutes' => 0,
-        'is_active' => 1
-      ], [
-        '%d', '%s', '%s', '%s', '%s', '%d', '%d'
-      ]);
+
+      $has_parking = $wpdb->get_var($wpdb->prepare(
+        "SELECT id FROM $table_parkings WHERE transaction_id = %d LIMIT 1",
+        $transaction_id
+      ));
+      if (!$has_parking) {
+        $wpdb->insert($table_parkings, [
+          'transaction_id' => $transaction_id,
+          'spz' => $order_data['spz'],
+          'zone_id' => $order_data['zone_id'],
+          'started_at' => $started_at,
+          'expires_at' => $expires_at,
+          'extended_minutes' => 0,
+          'is_active' => 1
+        ], [
+          '%d', '%s', '%s', '%s', '%s', '%d', '%d'
+        ]);
+      }
     }
     
     // Отправить квитанцию
     if (function_exists('zp_send_receipt')) {
       zp_send_receipt($order_data['email'], array_merge($order_data, [
-        'payment_id' => $payment_id
+        'payment_id' => $payment_id,
+        'order_number' => $order_number,
+        'paid_at' => $paid_at,
+        'started_at' => isset($started_at) ? $started_at : null,
+        'expires_at' => isset($expires_at) ? $expires_at : null,
       ]));
     }
     
@@ -330,6 +392,8 @@ class ZP_Barion_Gateway {
     }
     
     $payment_id = isset($_GET['paymentId']) ? sanitize_text_field($_GET['paymentId']) : null;
+    $lang = isset($_GET['lang']) ? strtolower(sanitize_text_field($_GET['lang'])) : '';
+    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = '';
     
     if (!$payment_id) {
       wp_die('Neplatný paymentId');
@@ -339,15 +403,21 @@ class ZP_Barion_Gateway {
     $state = self::get_payment_state($payment_id);
     
     if (!$state['success']) {
-      wp_redirect(add_query_arg(['zp_payment' => 'error'], home_url('/')));
+      $args = ['zp_payment' => 'error'];
+      if ($lang) $args['lang'] = $lang;
+      wp_redirect(add_query_arg($args, home_url('/')));
       exit;
     }
     
     if ($state['status'] === 'Succeeded') {
       self::handle_successful_payment($payment_id, $state['orderNumber']);
-      wp_redirect(add_query_arg(['zp_payment' => 'success', 'pid' => $payment_id], home_url('/')));
+      $args = ['zp_payment' => 'success', 'pid' => $payment_id];
+      if ($lang) $args['lang'] = $lang;
+      wp_redirect(add_query_arg($args, home_url('/')));
     } else {
-      wp_redirect(add_query_arg(['zp_payment' => 'failed'], home_url('/')));
+      $args = ['zp_payment' => 'failed'];
+      if ($lang) $args['lang'] = $lang;
+      wp_redirect(add_query_arg($args, home_url('/')));
     }
     exit;
   }

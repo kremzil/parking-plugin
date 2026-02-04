@@ -12,6 +12,14 @@
   const CFG = getCfg();
   const I18N = (CFG && CFG.i18n) || {};
   const t = (key, fallback) => (I18N && I18N[key]) ? I18N[key] : (fallback || key);
+  const hasI18n = (key) => (I18N && Object.prototype.hasOwnProperty.call(I18N, key));
+  function zoneLabelById(zoneId, fallback){
+    const id = (zoneId || '').toString().trim();
+    if (!id) return fallback || '';
+    const key = 'zone_name_' + id.toLowerCase();
+    if (hasI18n(key)) return I18N[key];
+    return (fallback || id);
+  }
   function tpl(str, vars){
     return (str || '').replace(/\{\{(\w+)\}\}/g, function(_, k){
       return (vars && Object.prototype.hasOwnProperty.call(vars, k)) ? vars[k] : '';
@@ -99,12 +107,14 @@
         const g = f.geometry, props = f.properties || {};
         if (g.type === 'Polygon') {
           if (insideOrNearPolygon(pt, g.coordinates, TOL_M)) {
-            return { band: (props.id||props.zone_id||props.name||'Z').toUpperCase(), label: props.label || props.id || t('zone_label_default', 'Zóna') };
+            const band = (props.id||props.zone_id||props.name||'Z').toUpperCase();
+            return { band, label: zoneLabelById(band, props.label || props.id || t('zone_label_default', 'Zóna')) };
           }
         } else if (g.type === 'MultiPolygon') {
           for (const poly of g.coordinates) {
             if (insideOrNearPolygon(pt, poly, TOL_M)) {
-              return { band: (props.id||props.zone_id||props.name||'Z').toUpperCase(), label: props.label || props.id || t('zone_label_default', 'Zóna') };
+              const band = (props.id||props.zone_id||props.name||'Z').toUpperCase();
+              return { band, label: zoneLabelById(band, props.label || props.id || t('zone_label_default', 'Zóna')) };
             }
           }
         }
@@ -179,7 +189,9 @@
       }).addTo(_map);
       // Geocoder (Leaflet Control Geocoder via Nominatim)
       try {
-        if (L.Control && L.Control.geocoder) {
+        // If we have a dedicated address search input, avoid duplicating search UI on the map.
+        const hasExternalSearch = !!document.getElementById('zp-address');
+        if (!hasExternalSearch && L.Control && L.Control.geocoder) {
           L.Control.geocoder({ defaultMarkGeocode:false, placeholder:t('geocoder_placeholder', 'Hľadať adresu…') })
             .on('markgeocode', function(e){
               var ll = e.geocode.center;
@@ -233,16 +245,14 @@
     const t = document.getElementById('geo-wait-msg');
     if (!m) return;
     if (t && msg) { t.textContent = msg; t.style.display = 'block'; }
-    m.classList.add('show');
     m.style.display = 'block';
-    m.removeAttribute('aria-hidden');
+    m.setAttribute('aria-hidden', 'false');
   }
   function hideGeoModal(){
     const m = document.getElementById('geoModal');
     if (!m) return;
-    m.classList.remove('show');
     m.style.display = 'none';
-    m.setAttribute('aria-hidden','true');
+    m.setAttribute('aria-hidden', 'true');
   }
   function setGeoWaitMsg(msg){
     const t = document.getElementById('geo-wait-msg');
@@ -264,15 +274,19 @@
 
     if (z) {
       document.getElementById('band').value = (z.band || '').toUpperCase();
+      // sync manual zone select (if present)
+      const zoneSel = document.getElementById('zp-zone-select');
+      if (zoneSel && z.band) zoneSel.value = (z.band || '').toUpperCase();
       if (zoneEl) {
-        zoneEl.className = 'alert alert-success';
-        zoneEl.innerHTML = tpl(t('zone_result_success_html', 'Zóna: <b>{{label}}</b> (tarifa {{band}})'), { label: z.label, band: z.band });
+        const label = zoneLabelById(z.band, z.label);
+        zoneEl.className = 'zp-banner is-ok';
+        zoneEl.innerHTML = tpl(t('zone_result_success_html', 'Zóna: <b>{{label}}</b> (tarifa {{band}})'), { label, band: z.band });
       }
       if (IS_OSM) highlightZoneById(z.band);
     } else {
       document.getElementById('band').value = '';
       if (zoneEl) {
-        zoneEl.className = 'alert alert-danger';
+        zoneEl.className = 'zp-banner is-bad';
         zoneEl.textContent = t('zone_result_outside', '❌ Poloha mimo zón.');
       }
     }
@@ -289,7 +303,7 @@
   function initGeo() {
     const zoneEl = document.getElementById('zone-result');
     // Показать карту сразу (по центру мок1), чтобы UI не был пустой
-    try { if (IS_OSM) { ensureOSMMap(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng); } } catch(_){}
+    try { renderMap(DEFAULT_CENTER.lat, DEFAULT_CENTER.lng); } catch(_){}
 
     // модалка — только по необходимости; изначально скрываем "ожидание"
     const waitMsg = document.getElementById('geo-wait-msg');
@@ -329,34 +343,133 @@
     // Кнопки модалки
     const btnPickInModal = document.getElementById('zp-modal-pick');
     const btnPick = document.getElementById('zp-pick'); // под картой
+    const btnDetect = document.getElementById('zp-detect');
+    const btnCloseGeo = document.getElementById('zp-geo-close');
+
+    if (btnCloseGeo) btnCloseGeo.addEventListener('click', hideGeoModal);
+    // close modal on backdrop click
+    const geoModal = document.getElementById('geoModal');
+    if (geoModal) {
+      geoModal.addEventListener('click', function(e){
+        if (e && e.target === geoModal) hideGeoModal();
+      });
+    }
 
     if (btnPickInModal) btnPickInModal.addEventListener('click', function(){
       _userPickedManually = true; // помечаем, что пользователь выбрал точку вручную
       _pickActive = true;
       hideGeoModal();
-      if (zoneEl) { zoneEl.className = 'alert alert-warning'; zoneEl.textContent = t('pick_instruction', '👆 Klikni na mapu, kde parkuješ.'); }
+      if (zoneEl) { zoneEl.className = 'zp-banner is-warn'; zoneEl.textContent = t('pick_instruction', '👆 Klikni na mapu, kde parkuješ.'); }
       const el = document.getElementById('map-frame'); if (el) el.style.cursor = 'crosshair';
       setTimeout(()=>{ if (_pickActive){ _pickActive=false; if (el) el.style.cursor=''; } }, 15000);
     });
     if (btnPick) btnPick.addEventListener('click', function(){
+      if (!IS_OSM) {
+        if (zoneEl) { zoneEl.className = 'zp-banner is-warn'; zoneEl.textContent = t('tip_osm', 'Tip: výber bodu funguje v režime OpenStreetMap.'); }
+        return;
+      }
       _userPickedManually = true; // помечаем, что пользователь выбрал точку вручную
       _pickActive = true;
-      if (zoneEl) { zoneEl.className = 'alert alert-warning'; zoneEl.textContent = t('pick_instruction', '👆 Klikni na mapu, kde parkuješ.'); }
+      if (zoneEl) { zoneEl.className = 'zp-banner is-warn'; zoneEl.textContent = t('pick_instruction', '👆 Klikni na mapu, kde parkuješ.'); }
       const el = document.getElementById('map-frame'); if (el) el.style.cursor = 'crosshair';
       setTimeout(()=>{ if (_pickActive){ _pickActive=false; if (el) el.style.cursor=''; } }, 15000);
     });
 
-    // --- мок как раньше ---
-    if (hasMock()) {
-      const lat = DEFAULT_CENTER.lat, lng = DEFAULT_CENTER.lng;
-      if (zoneEl) { zoneEl.className = 'alert alert-info'; zoneEl.textContent = tpl(t('dev_mock', '🧪 DEV: {{lat}}, {{lng}}'), { lat: lat.toFixed(6), lng: lng.toFixed(6) }); }
-      setHelpLL(lat, lng, 'gps');
-      afterPosition(lat, lng);
-      hideGeoModal();
-      return;
+    // Manual zone select
+    const zoneSel = document.getElementById('zp-zone-select');
+    function applyManualZone(zoneId){
+      const id = (zoneId || '').toUpperCase();
+      const bandEl = document.getElementById('band');
+      if (bandEl) bandEl.value = id;
+      if (zoneEl) {
+        if (!id) {
+          zoneEl.className = 'zp-banner';
+          zoneEl.textContent = t('zone_detecting', '⏳ Zisťujeme tvoju polohu...');
+        } else {
+          const label = zoneLabelById(id, zoneSel && zoneSel.options && zoneSel.selectedIndex >= 0
+            ? (zoneSel.options[zoneSel.selectedIndex].textContent || id)
+            : id);
+          zoneEl.className = 'zp-banner is-ok';
+          zoneEl.innerHTML = tpl(t('zone_result_success_html', 'Zóna: <b>{{label}}</b> (tarifa {{band}})'), { label, band: id });
+        }
+      }
+      if (id && IS_OSM) highlightZoneById(id);
+      document.dispatchEvent(new CustomEvent('zp:zoneResolved', { detail: { band: id || null } }));
+    }
+    if (zoneSel) {
+      zoneSel.addEventListener('change', function(){
+        _userPickedManually = true;
+        applyManualZone(zoneSel.value);
+      });
     }
 
-    // автостарт гео; если невозможно — покажем модалку с выбором
+    // Address search (Nominatim)
+    const addrInput = document.getElementById('zp-address');
+    const addrBox = document.getElementById('zp-address-results');
+    let _addrTimer = null;
+    function hideAddrBox(){
+      if (!addrBox) return;
+      addrBox.style.display = 'none';
+      addrBox.innerHTML = '';
+    }
+    async function searchAddress(q){
+      if (!addrBox) return;
+      const query = (q || '').trim();
+      if (query.length < 3) { hideAddrBox(); return; }
+      try {
+        const res = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=5&addressdetails=1&countrycodes=sk&q=' + encodeURIComponent(query), {
+          headers: { 'Accept': 'application/json' }
+        });
+        if (!res.ok) throw new Error('bad_response');
+        const data = await res.json();
+        const items = Array.isArray(data) ? data : [];
+        if (!items.length) { hideAddrBox(); return; }
+        addrBox.innerHTML = '';
+        for (const it of items) {
+          const btn = document.createElement('button');
+          btn.type = 'button';
+          const name = (it.display_name || '').toString();
+          const parts = name.split(',').map(s => s.trim()).filter(Boolean);
+          const title = parts[0] || name || '';
+          const sub = parts.slice(1).join(', ');
+          btn.innerHTML = `<div class="zp-dd-title"></div><div class="zp-dd-sub"></div>`;
+          btn.querySelector('.zp-dd-title').textContent = title;
+          btn.querySelector('.zp-dd-sub').textContent = sub;
+          btn.addEventListener('click', function(){
+            const lat = parseFloat(it.lat);
+            const lng = parseFloat(it.lon);
+            if (!isFinite(lat) || !isFinite(lng)) return;
+            _userPickedManually = true;
+            if (addrInput) addrInput.value = name;
+            hideAddrBox();
+            setHelpLL(lat, lng, 'manual');
+            afterPosition(+lat.toFixed(6), +lng.toFixed(6));
+          });
+          addrBox.appendChild(btn);
+        }
+        addrBox.style.display = 'block';
+      } catch(_e) {
+        hideAddrBox();
+      }
+    }
+    if (addrInput) {
+      addrInput.addEventListener('input', function(){
+        if (_addrTimer) clearTimeout(_addrTimer);
+        const val = addrInput.value;
+        _addrTimer = setTimeout(() => searchAddress(val), 450);
+      });
+      addrInput.addEventListener('focus', function(){
+        if (addrBox && addrBox.innerHTML) addrBox.style.display = 'block';
+      });
+    }
+    document.addEventListener('mousedown', function(e){
+      if (!addrBox || addrBox.style.display !== 'block') return;
+      const t = e && e.target;
+      if (t === addrInput || (addrBox && addrBox.contains(t))) return;
+      hideAddrBox();
+    });
+
+    // гео запускается только по нажатию кнопки
     function startGeo() {
       if (_geoInFlight) return;      // защита от дубликатов
       _geoInFlight = true;
@@ -366,7 +479,7 @@
         askModal(t('geo_not_supported', '❌ Prehliadač nepodporuje určovanie polohy.')); 
         return; 
       }
-      if (zoneEl) { zoneEl.className = 'alert alert-info'; zoneEl.textContent = t('geo_getting', '⏳ Získavame tvoju polohu...'); }
+      if (zoneEl) { zoneEl.className = 'zp-banner'; zoneEl.textContent = t('geo_getting', '⏳ Získavame tvoju polohu...'); }
       if (waitMsg) waitMsg.style.display = 'block';
 
       navigator.geolocation.getCurrentPosition(
@@ -398,16 +511,11 @@
         startPermissionWatch();  // начать слушать изменение разрешений и возврат на вкладку
     }
 
-    if ('geolocation' in navigator) {
-      if (navigator.permissions && navigator.permissions.query) {
-        navigator.permissions.query({ name: 'geolocation' }).then(p => {
-          if (p.state === 'denied') askModal(t('geo_denied_short', 'ℹ️ Geolokácia je vypnutá. Povoliť alebo vybrať bod ručne?'));
-          else startGeo(); // granted alebo prompt
-        }).catch(() => startGeo());
-      } else startGeo();
-    } else {
-      askModal(t('geo_not_supported', '❌ Prehliadač nepodporuje určovanie polohy.'));
-    }
+    // "Detect location" button
+    if (btnDetect) btnDetect.addEventListener('click', function(){
+      _userPickedManually = false;
+      startGeo();
+    });
   }
 
   window.addEventListener('load', initGeo);

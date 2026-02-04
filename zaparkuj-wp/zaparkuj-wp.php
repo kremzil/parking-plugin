@@ -111,10 +111,85 @@ class Zaparkuj_WP_045 {
     wp_enqueue_script('zaparkuj-checkout-barion');
 
     $tariffs_arr = self::get_tariffs_array();
+    $lang = zp_get_lang();
     $gj   = get_option(self::OPT_GJ, '');
     $map  = get_option(self::OPT_MAP, 'osm');
     $tolm = floatval(get_option(self::OPT_TOL, 25));
     $circ = !!get_option(self::OPT_CIRC, false);
+
+    // Payment success data for the "success" screen (when returning from Barion redirect).
+    $payment_success = null;
+    $email_preview_html = null;
+    if (isset($_GET['zp_payment']) && $_GET['zp_payment'] === 'success' && !empty($_GET['pid'])) {
+      global $wpdb;
+      $pid = sanitize_text_field($_GET['pid']);
+      $table_transactions = $wpdb->prefix . 'zp_transactions';
+      $table_parkings = $wpdb->prefix . 'zp_parkings';
+
+      $tx = $wpdb->get_row(
+        $wpdb->prepare("SELECT * FROM $table_transactions WHERE barion_payment_id = %s LIMIT 1", $pid),
+        ARRAY_A
+      );
+      if (is_array($tx) && ($tx['status'] ?? '') === 'completed') {
+        $pk = $wpdb->get_row(
+          $wpdb->prepare("SELECT * FROM $table_parkings WHERE transaction_id = %d ORDER BY id DESC LIMIT 1", intval($tx['id'])),
+          ARRAY_A
+        );
+
+        $zone_label = $tx['zone_id'] ?? '';
+        $zone_cfg = null;
+        $zones = is_array($tariffs_arr) && isset($tariffs_arr['zones']) && is_array($tariffs_arr['zones']) ? $tariffs_arr['zones'] : [];
+        foreach ($zones as $z) {
+          $zid = isset($z['id']) ? strtoupper(trim((string)$z['id'])) : '';
+          if ($zid && strtoupper((string)($tx['zone_id'] ?? '')) === $zid) {
+            $zone_label = $z['label'] ?? $z['id'];
+            $zone_cfg = $z;
+            break;
+          }
+        }
+
+        $zone_id = isset($tx['zone_id']) ? strtoupper((string)$tx['zone_id']) : '';
+        if ($zone_id) {
+          $zone_key = 'zone_name_' . strtolower($zone_id);
+          $zone_i18n = zp_t($zone_key, $lang);
+          if ($zone_i18n !== $zone_key) $zone_label = $zone_i18n;
+        }
+
+        $payment_success = [
+          'paymentId' => $tx['barion_payment_id'] ?? $pid,
+          'orderNumber' => $tx['order_number'] ?? null,
+          'transactionDbId' => isset($tx['id']) ? intval($tx['id']) : null,
+          'spz' => $tx['spz'] ?? '',
+          'email' => $tx['email'] ?? '',
+          'zone_id' => $tx['zone_id'] ?? '',
+          'zone_label' => $zone_label,
+          'minutes' => isset($tx['minutes']) ? intval($tx['minutes']) : null,
+          'amount_cents' => isset($tx['amount_cents']) ? intval($tx['amount_cents']) : null,
+          'paid_at' => $tx['paid_at'] ?? null,
+          'started_at' => is_array($pk) ? ($pk['started_at'] ?? null) : null,
+          'expires_at' => is_array($pk) ? ($pk['expires_at'] ?? null) : null,
+          'zone_cfg' => $zone_cfg,
+        ];
+
+        if (function_exists('zp_render_email_template') && function_exists('zp_build_receipt_template_vars')) {
+          $lang = $lang ?: zp_get_lang();
+          $email_preview_html = zp_render_email_template(zp_build_receipt_template_vars([
+            'lang' => $lang,
+            'spz' => $tx['spz'] ?? '',
+            'zone_id' => $tx['zone_id'] ?? '',
+            'minutes' => $tx['minutes'] ?? '',
+            'amount_cents' => $tx['amount_cents'] ?? 0,
+            'paid_at' => $tx['paid_at'] ?? current_time('mysql'),
+            'payment_id' => $tx['barion_payment_id'] ?? $pid,
+            'order_number' => $tx['order_number'] ?? '',
+            'started_at' => is_array($pk) ? ($pk['started_at'] ?? null) : null,
+            'expires_at' => is_array($pk) ? ($pk['expires_at'] ?? null) : null,
+            'lat' => $tx['lat'] ?? '',
+            'lng' => $tx['lng'] ?? '',
+          ]));
+        }
+      }
+    }
 
     $cfg = [
       'rest' => [
@@ -127,109 +202,341 @@ class Zaparkuj_WP_045 {
       'geojson_tolerance_m' => $tolm,
       'enable_circles' => $circ ? true : false,
       'default_center' => ['lat'=>48.7205,'lng'=>21.2575],
-      'lang' => zp_get_lang(),
+      'lang' => $lang,
       'i18n' => zp_get_i18n(),
+      'payment_success' => $payment_success,
+      'email_preview_html' => $email_preview_html,
     ];
 
     ob_start(); ?>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-
     <?php if ($map === 'osm') : ?>
       <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="anonymous">
       <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin="anonymous"></script>
       <link rel="stylesheet" href="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.css" crossorigin="anonymous">
       <script src="https://unpkg.com/leaflet-control-geocoder/dist/Control.Geocoder.js" crossorigin="anonymous"></script>
-      <style>#map-frame { height: 320px; border-radius: 10px; overflow: hidden; background: #f5f5f5; }</style>
-    <?php else: ?>
-      <style>#map-frame { height: 320px; border-radius: 10px; overflow: hidden; background: #f5f5f5; }</style>
     <?php endif; ?>
 
     <script type="application/json" id="zp-config"><?php echo wp_json_encode($cfg); ?></script>
 
     <!-- Geo Modal -->
-    <div class="modal fade" id="geoModal" tabindex="-1" aria-hidden="true" style="background: rgba(0,0,0,0.7);">
-      <div class="modal-dialog modal-dialog-centered"><div class="modal-content text-center">
-        <div class="modal-header"><h5 class="modal-title"><?php echo esc_html(zp_t('modal_title')); ?></h5></div>
-        <div class="modal-body">
-          <p><?php echo esc_html(zp_t('modal_body')); ?></p>
-
-          <div class="d-grid gap-2 mt-3">
-            <button type="button" id="zp-modal-pick" class="btn btn-outline-secondary">
-              <?php echo esc_html(zp_t('modal_pick')); ?>
-            </button>
-          </div>
-
-          <p id="geo-wait-msg" class="text-muted mt-3" style="display:none"><?php echo esc_html(zp_t('modal_wait')); ?></p>
+    <div class="zp-modal" id="geoModal" aria-hidden="true">
+      <div class="zp-modal-panel">
+        <div class="zp-modal-head">
+          <strong><?php echo esc_html(zp_t('modal_title')); ?></strong>
+          <button type="button" class="zp-modal-close" id="zp-geo-close"><?php echo esc_html(zp_t('close')); ?></button>
         </div>
-
-      </div></div>
-    </div>
-
-    <div class="container" style="max-width:720px">
-      <div style="height:72px;display:flex;align-items:center;justify-content:space-between;margin:12px 0;position:relative;width:100%;">
-        <img src="https://www.pkosice.sk/wp-content/uploads/2025/08/pkosice-LOGO-03.png" alt="pkosice" style="height:72px;width:auto;">
-        <div id="zp-lang-switcher" data-fixed="1" style="display:flex;align-items:center;gap:8px;margin-left:auto;position:static;">
-          <select id="zp-lang" class="form-select form-select-sm" style="width:auto">
-            <option value="sk"><?php echo esc_html(zp_t('lang_sk')); ?></option>
-            <option value="en"><?php echo esc_html(zp_t('lang_en')); ?></option>
-            <option value="pl"><?php echo esc_html(zp_t('lang_pl')); ?></option>
-            <option value="hu"><?php echo esc_html(zp_t('lang_hu')); ?></option>
-            <option value="sv"><?php echo esc_html(zp_t('lang_sv')); ?></option>
-            <option value="zh"><?php echo esc_html(zp_t('lang_zh')); ?></option>
-          </select>
+        <div class="zp-card-inner">
+          <p style="margin:0;color:#475467;font-size:13px;line-height:1.5;"><?php echo esc_html(zp_t('modal_body')); ?></p>
+          <div style="margin-top:12px;display:flex;gap:10px;">
+            <button type="button" id="zp-modal-pick" class="zp-btn"><?php echo esc_html(zp_t('modal_pick')); ?></button>
+          </div>
+          <p id="geo-wait-msg" style="display:none;margin-top:12px;color:#667085;font-size:12px;"><?php echo esc_html(zp_t('modal_wait')); ?></p>
         </div>
       </div>
-      <div class="Content" style="margin-bottom: 60px;">
-      <div id="zone-result" class="alert alert-info"><?php echo esc_html(zp_t('zone_detecting')); ?></div>
-        <div>
-          <label class="form-label"><?php echo esc_html(zp_t('label_map')); ?></label>
-          <div id="map-frame"></div>
-          <div class="d-flex gap-2 mt-2">
-            <button type="button" id="zp-pick" class="btn btn-outline-secondary btn-sm"><?php echo esc_html(zp_t('button_pick_map')); ?></button>
+    </div>
+
+    <!-- Email preview modal -->
+    <div class="zp-modal" id="zp-email-modal" aria-hidden="true">
+      <div class="zp-modal-panel">
+        <div class="zp-modal-head">
+          <strong><?php echo esc_html(zp_t('email_title')); ?></strong>
+          <button type="button" class="zp-modal-close" id="zp-email-close"><?php echo esc_html(zp_t('close')); ?></button>
+        </div>
+        <div class="zp-modal-body">
+          <iframe id="zp-email-iframe" title="<?php echo esc_attr(zp_t('email_title')); ?>"></iframe>
+        </div>
+      </div>
+    </div>
+
+    <div class="zp-root" id="zp-app">
+      <div class="zp-shell">
+        <div class="zp-top">
+          <div class="zp-brand">
+            <div class="zp-mark" aria-hidden="true">
+              <div class="zp-mark-bg">
+                <div class="zp-mark-circle">P</div>
+              </div>
+              <div class="zp-mark-dot"></div>
+            </div>
+            <div class="zp-brand-title">
+              <strong>parkovne<span class="zp-accent">.sk</span></strong>
+              <span>inteligentné parkovanie</span>
+            </div>
           </div>
-          <div class="form-text" id="zp-ll-help"></div>
-          <?php if ($map !== 'osm'): ?><p class="text-muted small mt-1"><?php echo esc_html(zp_t('tip_osm')); ?></p><?php endif; ?>
-        </div>
-        
-      <form id="zp-form" class="d-grid gap-3 mt-4">
-        <input type="hidden" id="zp-lat">
-        <input type="hidden" id="zp-lng">
-        <input type="hidden" id="band">
-
-        <div>
-          <label class="form-label" for="zp-spz"><?php echo esc_html(zp_t('label_spz')); ?></label>
-          <input id="zp-spz" class="form-control" placeholder="<?php echo esc_attr(zp_t('placeholder_spz')); ?>" required>
+          <div id="zp-lang-switcher" data-fixed="1" class="zp-lang">
+            <select id="zp-lang">
+              <option value="sk"><?php echo esc_html(zp_t('lang_sk')); ?></option>
+              <option value="en"><?php echo esc_html(zp_t('lang_en')); ?></option>
+              <option value="pl"><?php echo esc_html(zp_t('lang_pl')); ?></option>
+              <option value="hu"><?php echo esc_html(zp_t('lang_hu')); ?></option>
+              <option value="sv"><?php echo esc_html(zp_t('lang_sv')); ?></option>
+              <option value="zh"><?php echo esc_html(zp_t('lang_zh')); ?></option>
+            </select>
+          </div>
         </div>
 
-        <div>
-          <label class="form-label" for="duration"><?php echo esc_html(zp_t('label_duration')); ?></label>
-          <select id="duration" class="form-select">
-            <option value="30"><?php echo esc_html(zp_t('duration_30')); ?></option>
-            <option value="60" selected><?php echo esc_html(zp_t('duration_60')); ?></option>
-            <option value="120"><?php echo esc_html(zp_t('duration_120')); ?></option>
-            <option value="480"><?php echo esc_html(zp_t('duration_480')); ?></option>
-            <option value="1440"><?php echo esc_html(zp_t('duration_1440')); ?></option>
+        <div class="zp-actions">
+          <button type="button" id="zp-detect" class="zp-btn"><?php echo esc_html(zp_t('detect_location')); ?></button>
+          <button type="button" id="zp-pick" class="zp-btn"><?php echo esc_html(zp_t('select_on_map')); ?></button>
+        </div>
+
+        <div id="zone-result" class="zp-banner"><?php echo esc_html(zp_t('zone_detecting')); ?></div>
+
+        <div class="zp-map">
+          <div id="map-frame"></div>
+        </div>
+
+        <div class="zp-card">
+          <div class="zp-card-inner">
+            <div class="zp-address">
+              <svg class="zp-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M21 21l-4.3-4.3m1.3-5.2a7 7 0 11-14 0 7 7 0 0114 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <input id="zp-address" class="zp-input" placeholder="<?php echo esc_attr(zp_t('search_address_placeholder')); ?>" autocomplete="off">
+              <div id="zp-address-results" class="zp-dropdown" style="display:none"></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="zp-zone">
+          <select id="zp-zone-select" aria-label="<?php echo esc_attr(zp_t('select_zone_from_list')); ?>">
+            <option value=""><?php echo esc_html(zp_t('select_zone_from_list')); ?></option>
+            <?php
+              $zones = isset($tariffs_arr['zones']) && is_array($tariffs_arr['zones']) ? $tariffs_arr['zones'] : [];
+              foreach ($zones as $z) {
+                $id = isset($z['id']) ? strtoupper(trim((string)$z['id'])) : '';
+                if (!$id) continue;
+                $label = isset($z['label']) && $z['label'] ? (string)$z['label'] : $id;
+                $zone_key = 'zone_name_' . strtolower($id);
+                $zone_i18n = zp_t($zone_key, $lang);
+                if ($zone_i18n !== $zone_key) $label = $zone_i18n;
+                printf('<option value="%s">%s</option>', esc_attr($id), esc_html($label));
+              }
+            ?>
           </select>
         </div>
 
-        <div>
-          <label class="form-label" for="zp-email"><?php echo esc_html(zp_t('label_email')); ?></label>
-          <input id="zp-email" type="email" class="form-control" placeholder="<?php echo esc_attr(zp_t('placeholder_email')); ?>" required>
+        <div class="zp-card" id="zp-main-card">
+          <div class="zp-card-header">
+            <div class="zp-card-title">
+              <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path d="M5 16l-1 0a2 2 0 01-2-2v-2.5A2.5 2.5 0 014.5 9H6l1-2.5A3 3 0 0110 4h4a3 3 0 013 2.5L18 9h1.5A2.5 2.5 0 0122 11.5V14a2 2 0 01-2 2h-1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                <path d="M7 16a2 2 0 104 0m6 0a2 2 0 104 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+              </svg>
+              <span id="zp-zone-title">—</span>
+            </div>
+            <div class="zp-card-meta">
+              <span class="zp-meta-item">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M12 21s7-4.5 7-11a7 7 0 10-14 0c0 6.5 7 11 7 11z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M12 10.5a2 2 0 100-4 2 2 0 000 4z" fill="currentColor" opacity="0.25"/>
+                </svg>
+                <span id="zp-zone-meta"><?php echo esc_html(zp_t('zone_label_default')); ?>: —</span>
+              </span>
+              <span class="zp-meta-item">
+                <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                  <path d="M4 10h16M4 14h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  <path d="M7 6h6a4 4 0 010 8H7a4 4 0 010-8z" stroke="currentColor" stroke-width="2"/>
+                </svg>
+                <span id="zp-zone-rate">—</span>
+              </span>
+            </div>
+          </div>
+          <div class="zp-card-inner">
+            <form id="zp-form" class="zp-form">
+              <input type="hidden" id="zp-lat">
+              <input type="hidden" id="zp-lng">
+              <input type="hidden" id="band">
+              <input type="hidden" id="duration" value="60">
+
+              <div class="zp-field">
+                <div class="zp-label">
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M5 16l-1 0a2 2 0 01-2-2v-2.5A2.5 2.5 0 014.5 9H6l1-2.5A3 3 0 0110 4h4a3 3 0 013 2.5L18 9h1.5A2.5 2.5 0 0122 11.5V14a2 2 0 01-2 2h-1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                    <path d="M7 16a2 2 0 104 0m6 0a2 2 0 104 0" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                  <label for="zp-spz"><?php echo esc_html(zp_t('label_spz')); ?></label>
+                </div>
+                <input id="zp-spz" class="zp-input" placeholder="<?php echo esc_attr(zp_t('placeholder_spz')); ?>" required>
+              </div>
+
+              <div class="zp-field">
+                <div class="zp-label">
+                  <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <path d="M4 4h16v16H4V4z" stroke="currentColor" stroke-width="2"/>
+                    <path d="M7 9h10M7 13h10M7 17h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                  <label for="zp-email"><?php echo esc_html(zp_t('label_email')); ?></label>
+                </div>
+                <input id="zp-email" type="email" class="zp-input" placeholder="<?php echo esc_attr(zp_t('placeholder_email')); ?>" required>
+              </div>
+
+              <div class="zp-field">
+                <div class="zp-tabs-row">
+                  <div class="zp-label" style="margin:0;">
+                    <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                      <path d="M12 7v5l3 2" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                      <path d="M12 21a9 9 0 100-18 9 9 0 000 18z" stroke="currentColor" stroke-width="2"/>
+                    </svg>
+                    <span><?php echo esc_html(zp_t('label_duration')); ?></span>
+                  </div>
+                  <button type="button" class="zp-link" id="zp-custom-time"><?php echo esc_html(zp_t('custom_time')); ?></button>
+                </div>
+                <div class="zp-tabs" id="zp-duration-tabs">
+                  <button type="button" class="zp-tab" data-min="30"><?php echo esc_html(zp_t('duration_30')); ?></button>
+                  <button type="button" class="zp-tab is-active" data-min="60"><?php echo esc_html(zp_t('duration_60')); ?></button>
+                  <button type="button" class="zp-tab" data-min="120"><?php echo esc_html(zp_t('duration_120')); ?></button>
+                  <button type="button" class="zp-tab" data-min="240"><?php echo esc_html(zp_t('duration_240')); ?></button>
+                </div>
+                <div id="zp-duration-custom" style="display:none;margin-top:10px;">
+                  <div class="zp-summary" style="background:rgba(3,2,19,0.06);">
+                    <div style="text-align:center;">
+                      <strong id="zp-duration-display" style="font-size:20px;color:var(--zp-primary);"><?php echo esc_html(zp_t('duration_60')); ?></strong>
+                    </div>
+                  </div>
+                  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:10px;">
+                    <button type="button" class="zp-btn" data-add="30"><?php echo esc_html(zp_t('add_30m')); ?></button>
+                    <button type="button" class="zp-btn" data-add="60"><?php echo esc_html(zp_t('add_1h')); ?></button>
+                    <button type="button" class="zp-btn" data-add="120"><?php echo esc_html(zp_t('add_2h')); ?></button>
+                    <button type="button" class="zp-btn" data-add="240"><?php echo esc_html(zp_t('add_4h')); ?></button>
+                  </div>
+                  <div style="margin-top:8px;">
+                    <button type="button" class="zp-btn" data-add="-30" style="width:100%;"><?php echo esc_html(zp_t('sub_30m')); ?></button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="zp-summary" id="zp-summary" style="display:none;">
+                <div class="zp-summary-row">
+                  <span><?php echo esc_html(zp_t('price_per_hour_label')); ?></span>
+                  <strong id="zp-sum-hour">—</strong>
+                </div>
+                <div class="zp-summary-row">
+                  <span><?php echo esc_html(zp_t('label_duration')); ?></span>
+                  <strong id="zp-sum-duration">—</strong>
+                </div>
+                <div class="zp-divider"></div>
+                <div class="zp-total">
+                  <strong><?php echo esc_html(zp_t('total_price_label')); ?></strong>
+                  <span id="zp-sum-total">—</span>
+                </div>
+              </div>
+
+              <button id="zp-pay" type="submit" class="zp-pay" disabled><?php echo esc_html(str_replace('{{price}}', '0.00', zp_t('pay_button_price'))); ?></button>
+            </form>
+          </div>
         </div>
 
-
-
-        <div id="zp-payment-element" class="mt-3"></div>
-
-        <div class="d-flex justify-content-between align-items-center">
-          <div><strong><?php echo esc_html(zp_t('price_label')); ?></strong> <span id="zp-price">—</span></div>
-        </div>
-        <div class="form-text"><?php echo esc_html(zp_t('payment_note')); ?></div>
-
-        <button id="zp-pay" type="submit" class="btn btn-primary btn-lg"><?php echo esc_html(zp_t('pay_button')); ?></button>
-      </form>
+        <div style="display:none" id="zp-ll-help"></div>
+      </div>
     </div>
+    <div class="zp-success" id="zp-success-screen">
+      <div class="zp-shell">
+        <div class="zp-top" style="justify-content:center;">
+          <div class="zp-brand" style="justify-content:center;">
+            <div class="zp-mark" aria-hidden="true">
+              <div class="zp-mark-bg">
+                <div class="zp-mark-circle">P</div>
+              </div>
+              <div class="zp-mark-dot"></div>
+            </div>
+            <div class="zp-brand-title">
+              <strong>parkovne<span class="zp-accent">.sk</span></strong>
+              <span>inteligentné parkovanie</span>
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <div class="zp-success-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" fill="none">
+              <path d="M20 7L10 17l-5-5" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+          </div>
+          <h1 id="zp-success-title"><?php echo esc_html(zp_t('success_title')); ?></h1>
+          <p id="zp-success-msg"></p>
+        </div>
+
+        <div class="zp-card">
+          <div class="zp-card-inner" style="display:flex;flex-direction:column;gap:12px;">
+            <div style="background:#fff;border:2px solid #e5e7eb;border-radius:12px;padding:14px;display:flex;justify-content:center;">
+              <div style="width:160px;height:160px;border-radius:12px;background:linear-gradient(135deg,#f3f4f6,#e5e7eb);display:flex;align-items:center;justify-content:center;">
+                <div style="text-align:center;padding:0 12px;">
+                  <div id="zp-qr-id" style="font-size:12px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace;color:#4b5563;word-break:break-all;"></div>
+                  <div style="margin-top:8px;font-size:12px;color:#6b7280;"><?php echo esc_html(zp_t('scan_qr_label')); ?></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:#eff6ff;border:1px solid #bfdbfe;border-radius:10px;padding:10px 12px;">
+              <div style="font-size:12px;color:#2563eb;font-weight:700;"><?php echo esc_html(zp_t('transaction_id_label')); ?></div>
+              <div id="zp-txn-id" style="margin-top:4px;font-size:13px;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,'Liberation Mono','Courier New',monospace;color:#1e3a8a;word-break:break-all;"></div>
+            </div>
+
+            <div style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;gap:10px;align-items:flex-start;">
+                <div style="width:22px;flex:0 0 22px;color:#475467;">🚗</div>
+                <div style="flex:1;">
+                  <div style="font-size:12px;color:#667085;"><?php echo esc_html(zp_t('label_spz')); ?></div>
+                  <div id="zp-success-spz" style="font-size:16px;font-weight:800;color:#101828;"></div>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:10px;align-items:flex-start;">
+                <div style="width:22px;flex:0 0 22px;color:#475467;">📍</div>
+                <div style="flex:1;">
+                  <div style="font-size:12px;color:#667085;"><?php echo esc_html(zp_t('parking_zone_label')); ?></div>
+                  <div id="zp-success-zone" style="font-size:15px;font-weight:700;color:#101828;"></div>
+                  <div id="zp-success-zone-id" style="font-size:12px;color:#475467;"></div>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:10px;align-items:flex-start;">
+                <div style="width:22px;flex:0 0 22px;color:#475467;">📅</div>
+                <div style="flex:1;">
+                  <div style="font-size:12px;color:#667085;"><?php echo esc_html(zp_t('parking_period_label')); ?></div>
+                  <div id="zp-success-date" style="font-size:15px;font-weight:700;color:#101828;"></div>
+                  <div id="zp-success-time" style="font-size:13px;color:#344054;"></div>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:10px;align-items:flex-start;">
+                <div style="width:22px;flex:0 0 22px;color:#475467;">🕒</div>
+                <div style="flex:1;">
+                  <div style="font-size:12px;color:#667085;"><?php echo esc_html(zp_t('label_duration')); ?></div>
+                  <div id="zp-success-duration" style="font-size:15px;font-weight:700;color:#101828;"></div>
+                </div>
+              </div>
+
+              <div style="display:flex;gap:10px;align-items:flex-start;">
+                <div style="width:22px;flex:0 0 22px;color:#475467;">✉️</div>
+                <div style="flex:1;">
+                  <div style="font-size:12px;color:#667085;"><?php echo esc_html(zp_t('label_email')); ?></div>
+                  <div id="zp-success-email" style="font-size:13px;color:#101828;"></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:linear-gradient(90deg,#eff6ff,#eef2ff);border:1px solid #bfdbfe;border-radius:12px;padding:12px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="font-size:13px;color:#344054;"><?php echo esc_html(zp_t('total_paid_label')); ?></span>
+                <span id="zp-success-total" style="font-size:22px;font-weight:900;color:#1d4ed8;"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="zp-actions-col">
+          <button type="button" class="zp-btn-secondary" id="zp-view-email"><?php echo esc_html(zp_t('view_email_confirmation')); ?></button>
+          <button type="button" class="zp-btn-secondary" id="zp-download"><?php echo esc_html(zp_t('download_receipt')); ?></button>
+          <button type="button" class="zp-btn-secondary" id="zp-share"><?php echo esc_html(zp_t('share_receipt')); ?></button>
+          <button type="button" class="zp-pay" id="zp-new-parking"><?php echo esc_html(zp_t('new_parking')); ?></button>
+        </div>
+
+        <div class="zp-footer-note" id="zp-success-valid"></div>
+      </div>
+    </div>
+
     <?php
     return ob_get_clean();
   }
@@ -315,6 +622,8 @@ class Zaparkuj_WP_045 {
     $minutes = intval($p['minutes'] ?? 0);
     $lat     = isset($p['lat']) ? floatval($p['lat']) : null;
     $lng     = isset($p['lng']) ? floatval($p['lng']) : null;
+    $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
+    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
     $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
     if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
     if (!$spz || !$email || !$zone_id || !$minutes) return new WP_Error('missing_params','Missing required fields', ['status'=>422]);
