@@ -10,7 +10,7 @@
 - Метод `orders_page()` для админ-панели истории
 - REST endpoints для Barion
 - Обновлённый `shortcode()` с Barion конфигом
-- Удалены Stripe endpoints
+- Удалены legacy payment endpoints
 
 ### Новые файлы
 ✅ **includes/barion-gateway.php** (286 строк)
@@ -25,7 +25,7 @@
 - Серверный пересчёт цены
 
 ✅ **assets/js/checkout-barion.js** (212 строк)
-- Замена Stripe Elements на Barion redirect
+- Перевод checkout на Barion redirect
 - Функция `createBarionPayment()`
 - Обработка callback с query params
 - Success/error messages
@@ -39,10 +39,10 @@
 
 ### Документация
 ✅ **README.md** (обновлён)
-- Barion вместо Stripe
+- Barion интеграция
 - Раздел БД
 - Админ-панель описание
-- Сравнение Barion vs Stripe
+- Сравнение комиссий и подхода интеграции
 
 ✅ **BARION_MIGRATION.md** (новый)
 - Пошаговая инструкция миграции
@@ -126,7 +126,7 @@ CREATE TABLE wp_zp_parkings (
 - `zp_barion_payee_email` — email получателя
 - `zp_db_version` — версия структуры БД (0.5.0)
 
-### Удалённые опции
+### Удалённые legacy-опции
 - ~~`zp_stripe_pk`~~ ❌
 - ~~`zp_stripe_sk`~~ ❌
 - ~~`zp_stripe_whsec`~~ ❌
@@ -151,7 +151,7 @@ POST /wp-json/zaparkuj/v1/barion-ipn
 ### Удалённые endpoints
 ```
 ❌ POST /wp-json/zaparkuj/v1/session
-❌ POST /wp-json/zaparkuj/v1/stripe-webhook
+❌ POST /wp-json/zaparkuj/v1/legacy-webhook
 ❌ POST /wp-json/zaparkuj/v1/stub-mail
 ```
 

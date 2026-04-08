@@ -1,6 +1,6 @@
 /**
  * Barion checkout integration
- * Заменяет Stripe логику на Barion redirect flow
+ * Redirect flow for Barion payments
  */
 
 document.addEventListener('DOMContentLoaded', () => {

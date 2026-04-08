@@ -9,12 +9,13 @@
 if (!defined('ABSPATH')) exit;
 
 require_once plugin_dir_path(__FILE__) . 'includes/i18n.php';
+require_once plugin_dir_path(__FILE__) . 'includes/easypark-integration.php';
 
 class Zaparkuj_WP_045 {
   const SLUG = 'zaparkuj-wp';
   const VERSION = '0.5.0';
   
-  // Barion настройки (заменяют Stripe)
+  // Barion настройки
   const OPT_BARION_POSKEY = 'zp_barion_poskey';
   const OPT_BARION_ENV = 'zp_barion_environment';
   const OPT_BARION_PAYEE = 'zp_barion_payee_email';
@@ -29,6 +30,7 @@ class Zaparkuj_WP_045 {
   public static function init(){
     // Подключение Barion Gateway
     require_once plugin_dir_path(__FILE__) . 'includes/barion-gateway.php';
+    ZP_EasyPark_Integration::init();
     
     add_shortcode('zaparkuj', [__CLASS__,'shortcode']);
     add_action('wp_enqueue_scripts', [__CLASS__,'register_assets']);
@@ -90,6 +92,7 @@ class Zaparkuj_WP_045 {
     require_once(ABSPATH . 'wp-admin/includes/upgrade.php');
     dbDelta($sql1);
     dbDelta($sql2);
+    ZP_EasyPark_Integration::create_tables();
     
     // Установить версию БД
     update_option('zp_db_version', self::VERSION);
@@ -871,9 +874,9 @@ class Zaparkuj_WP_045 {
       'permission_callback' => function(){ return current_user_can('manage_options'); },
       'callback' => function(){
         return [
-          'has_pk' => !!get_option(self::OPT_PK, ''),
-          'has_sk' => !!get_option(self::OPT_SK, ''),
-          'has_whsec' => !!get_option(self::OPT_WH, ''),
+          'has_barion_poskey' => !!get_option(self::OPT_BARION_POSKEY, ''),
+          'barion_environment' => get_option(self::OPT_BARION_ENV, 'test'),
+          'has_barion_payee' => !!get_option(self::OPT_BARION_PAYEE, ''),
           'geojson_url' => get_option(self::OPT_GJ, ''),
           'map_provider' => get_option(self::OPT_MAP, 'google'),
           'tol_m' => get_option(self::OPT_TOL, 25),
@@ -882,126 +885,6 @@ class Zaparkuj_WP_045 {
         ];
       }
     ]);
-  }
-
-  public static function rest_session(WP_REST_Request $r){
-    $p = json_decode($r->get_body(), true);
-    if (!is_array($p)) return new WP_Error('bad_json', 'Bad JSON body', ['status'=>400]);
-    $spz     = trim(strtoupper($p['spz'] ?? ''));
-    $email   = trim($p['email'] ?? '');
-    $zone_id = strtoupper(trim($p['zone_id'] ?? ''));
-    $minutes = intval($p['minutes'] ?? 0);
-    $lat     = isset($p['lat']) ? floatval($p['lat']) : null;
-    $lng     = isset($p['lng']) ? floatval($p['lng']) : null;
-    $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
-    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
-    $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
-    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
-    if (!$spz || !$email || !$zone_id || !$minutes) return new WP_Error('missing_params','Missing required fields', ['status'=>422]);
-    $amount_cents = self::calc_price_cents($zone_id, $minutes);
-    if ($amount_cents < 50) return new WP_Error('amount_too_low','Amount too low', ['status'=>422]);
-    $sk = get_option(self::OPT_SK, '');
-    if (!$sk) return new WP_Error('no_sk', 'Stripe secret key missing', ['status'=>500]);
-
-    $body = [
-      'amount' => $amount_cents,
-      'currency' => 'eur',
-      'automatic_payment_methods[enabled]' => 'true',
-      'receipt_email' => $email,
-      'metadata[spz]' => $spz,
-      'metadata[zone_id]' => $zone_id,
-      'metadata[minutes]' => $minutes,
-      'metadata[lat]' => $lat,
-      'metadata[lng]' => $lng,
-    ];
-    $res = wp_remote_post('https://api.stripe.com/v1/payment_intents', [
-      'timeout' => 45,
-      'headers' => ['Authorization' => 'Bearer ' . $sk],
-      'body'    => $body,
-    ]);
-    if (is_wp_error($res)) {
-      error_log('[Zaparkuj] PI create error: ' . $res->get_error_message());
-      return new WP_Error('stripe_error', 'Stripe request failed', ['status'=>500]);
-    }
-    $code = wp_remote_retrieve_response_code($res);
-    $json = json_decode(wp_remote_retrieve_body($res), true);
-    if ($code < 200 || $code >= 300 || !isset($json['client_secret'])) {
-      error_log('[Zaparkuj] PI bad response: ' . wp_remote_retrieve_body($res));
-      return new WP_Error('stripe_bad_response', 'Stripe bad response', ['status'=>500]);
-    }
-    return ['client_secret' => $json['client_secret'],'amount_cents'  => $amount_cents];
-  }
-
-  public static function rest_stub_mail(WP_REST_Request $r){
-    $p = json_decode($r->get_body(), true);
-    if (!is_array($p)) return new WP_Error('bad_json', 'Bad JSON body', ['status'=>400]);
-    $email   = sanitize_email($p['email'] ?? '');
-    if (!$email) return new WP_Error('bad_email', 'Invalid email', ['status'=>422]);
-    $spz     = trim(strtoupper($p['spz'] ?? 'TEST123'));
-    $zone_id = strtoupper(trim($p['zone_id'] ?? 'A2'));
-    $minutes = intval($p['minutes'] ?? 60);
-    $lat     = isset($p['lat']) ? floatval($p['lat']) : null;
-    $lng     = isset($p['lng']) ? floatval($p['lng']) : null;
-    $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
-    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
-    $amount_cents = self::calc_price_cents($zone_id, $minutes);
-    if ($amount_cents <= 0) $amount_cents = 200;
-    require_once plugin_dir_path(__FILE__) . 'includes/mail-sender.php';
-    $ok = zp_send_receipt($email, compact('spz','zone_id','minutes','amount_cents','lat','lng','lang'));
-    if (!$ok) return new WP_Error('mail_failed','Mail send failed', ['status'=>500]);
-    return ['ok'=>true];
-  }
-
-  public static function rest_webhook(WP_REST_Request $r){
-    $sig = isset($_SERVER['HTTP_STRIPE_SIGNATURE']) ? $_SERVER['HTTP_STRIPE_SIGNATURE'] : '';
-    $body = $r->get_body();
-    error_log('[Zaparkuj] webhook hit: ' . substr($body,0,400));
-    $whsec = get_option(self::OPT_WH, '');
-    if ($whsec && !self::verify_stripe_signature($whsec, $sig, $body)) {
-      return new WP_Error('bad_sig','Invalid Stripe signature', ['status'=>400]);
-    } elseif(!$whsec) {
-      error_log('[Zaparkuj] webhook without signing secret – accepting for dev');
-    }
-    $event = json_decode($body, true);
-    if (!is_array($event) || empty($event['type'])) return new WP_Error('bad_event','Invalid event JSON', ['status'=>400]);
-    error_log('[Zaparkuj] webhook verified type=' . $event['type']);
-    if ($event['type'] === 'payment_intent.succeeded') {
-      $pi = $event['data']['object'];
-      $email = $pi['receipt_email'] ?? ($pi['charges']['data'][0]['billing_details']['email'] ?? '');
-      $spz = $pi['metadata']['spz'] ?? '';
-      $zone_id = $pi['metadata']['zone_id'] ?? '';
-      $minutes = isset($pi['metadata']['minutes']) ? intval($pi['metadata']['minutes']) : 0;
-      $amount_cents = isset($pi['amount']) ? intval($pi['amount']) : 0;
-      $lat = isset($pi['metadata']['lat']) ? $pi['metadata']['lat'] : null;
-      $lng = isset($pi['metadata']['lng']) ? $pi['metadata']['lng'] : null;
-      if ($email) {
-        require_once plugin_dir_path(__FILE__) . 'includes/mail-sender.php';
-        zp_send_receipt($email, compact('spz','zone_id','minutes','amount_cents','lat','lng'));
-      } else {
-        error_log('[Zaparkuj] webhook: no email in PI to send receipt');
-      }
-    }
-    return ['ok'=>true];
-  }
-
-  private static function parse_sig_header($sig_header){
-    $parts = [];
-    foreach (explode(',', $sig_header) as $kv) {
-      $kv = trim($kv);
-      if (strpos($kv, '=') === false) continue;
-      list($k,$v) = explode('=', $kv, 2);
-      $parts[$k] = $v;
-    }
-    return $parts;
-  }
-  private static function verify_stripe_signature($secret, $sig_header, $payload){
-    if (!$sig_header) return false;
-    $p = self::parse_sig_header($sig_header);
-    if (empty($p['t']) || empty($p['v1'])) return false;
-    $signed_payload = $p['t'] . '.' . $payload;
-    $computed = hash_hmac('sha256', $signed_payload, $secret);
-    if (function_exists('hash_equals')) return hash_equals($computed, $p['v1']);
-    return $computed === $p['v1'];
   }
 
   public static function admin_menu(){
@@ -1041,6 +924,7 @@ class Zaparkuj_WP_045 {
     register_setting($group, self::OPT_MAP);
     register_setting($group, self::OPT_TOL);
     register_setting($group, self::OPT_CIRC);
+    ZP_EasyPark_Integration::register_settings($group);
   }
   public static function settings_page(){ ?>
     <div class="wrap">
@@ -1097,10 +981,10 @@ class Zaparkuj_WP_045 {
             <td><textarea name="<?php echo esc_attr(self::OPT_TAR); ?>" id="<?php echo esc_attr(self::OPT_TAR); ?>" class="large-text code" rows="10"><?php echo esc_textarea(get_option(self::OPT_TAR,'')); ?></textarea>
             <p class="description">Example: {"zones":[{"id":"A2","base_30":1.0,"daily_cap":16}]}</p></td></tr>
         </table>
+        
+        <?php ZP_EasyPark_Integration::render_settings_fields(); ?>
+
         <?php submit_button(); ?>
-      </form>
-        </table>
-        <?php submit_button('Uložiť nastavenia'); ?>
       </form>
       
       <hr>

@@ -78,25 +78,26 @@ ZAPARKUJ/plugin/
 ├── zones.for_plugin.remapped.geojson      # GeoJSON с полигонами зон
 ├── tariffs-kosice-remapped.json           # Пример тарифов (Кошице)
 │
-└── zaparkuj-wp-0_4_5/
-    └── zaparkuj-wp-0_4_5/
-        ├── zaparkuj-wp.php                # Главный файл плагина
-        ├── readme.txt                     # WordPress readme
-        │
-        ├── assets/
-        │   ├── css/
-        │   │   └── style.css              # Стили плагина
-        │   └── js/
-        │       ├── bands.js               # Утилиты для зон
-        │       ├── geo.js                 # Геолокация, карты, определение зон
-        │       └── checkout.js            # Расчёт цены, Stripe checkout
-        │
-        ├── includes/
-        │   └── mail-sender.php            # Отправка email-квитанций
-        │
-        └── templates/
-            ├── email.html                 # Шаблон email (HTML)
-            └── email.html.php             # Шаблон email (PHP)
+└── zaparkuj-wp/
+    ├── zaparkuj-wp.php                    # Главный файл плагина
+    ├── readme.txt                         # WordPress readme
+    │
+    ├── assets/
+    │   ├── css/
+    │   │   └── style.css                  # Стили плагина
+    │   └── js/
+    │       ├── bands.js                   # Утилиты для зон
+    │       ├── geo.js                     # Геолокация, карты, определение зон
+    │       └── checkout-barion.js         # Redirect flow Barion
+    │
+    ├── includes/
+    │   ├── barion-gateway.php             # Интеграция с Barion
+    │   ├── easypark-integration.php       # Каркас интеграции EasyPark
+    │   └── mail-sender.php                # Отправка email-квитанций
+    │
+    └── templates/
+        ├── email.html                     # Шаблон email (HTML)
+        └── email.html.php                 # Шаблон email (PHP)
 ```
 
 ---
@@ -107,13 +108,13 @@ ZAPARKUJ/plugin/
 
 ```bash
 # Скопируйте папку плагина в WordPress
-cp -r zaparkuj-wp-0_4_5/zaparkuj-wp-0_4_5 /path/to/wordpress/wp-content/plugins/
+cp -r zaparkuj-wp /path/to/wordpress/wp-content/plugins/
 ```
 
 ### 2. Установка Barion SDK
 
 ```bash
-cd /path/to/wordpress/wp-content/plugins/zaparkuj-wp-0_4_5/zaparkuj-wp-0_4_5
+cd /path/to/wordpress/wp-content/plugins/zaparkuj-wp
 composer require barion/barion-web-php
 ```
 
@@ -168,7 +169,7 @@ composer require barion/barion-web-php
 - Выбора зоны парковки
 - Выбора длительности
 - Ввода данных (SPZ, email)
-- Оплаты через Stripe
+- Оплаты через Barion
 
 ---
 
@@ -423,31 +424,27 @@ define('WP_DEBUG_LOG', true);
 
 ---
 
-## � Сравнение Barion vs Stripe
+## 💳 Преимущества Barion
 
-| | Stripe | Barion |
-|---|---|---|
-| **Домашние карты (SK/CZ/HU)** | 1.4% + 0.25€ | **0.9% + 0.10€** ✅ |
-| **EU карты** | 1.4% + 0.25€ | 1.5% + 0.10€ |
-| **Barion Wallet** | - | **0.5%** ✅ |
-| **Интеграция** | Сложная (Elements) | Простая (redirect) ✅ |
-| **Локальная поддержка** | Английский | **Словацкий** ✅ |
-| **PSD2/3DS** | Автоматически | Автоматически |
+| Параметр | Barion |
+|---|---|
+| **Домашние карты (SK/CZ/HU)** | **0.9% + 0.10€** |
+| **EU карты** | 1.5% + 0.10€ |
+| **Barion Wallet** | **0.5%** |
+| **Интеграция** | Простая redirect flow |
+| **Локальная поддержка** | Словацкий jazyk |
+| **PSD2/3DS** | Podporované |
 
-**Экономия на примере:**  
-Платёж 10€ с локальной картой:
-- Stripe: 10€ × 1.4% + 0.25€ = **0.39€** (3.9%)
-- Barion: 10€ × 0.9% + 0.10€ = **0.19€** (1.9%)
-- **Экономия: 0.20€ (~51%)**
-
-При 1000 транзакций в месяц: **200€ экономии!**
+**Пример комиссии:**  
+Платёж 10€ с локальной картой через Barion:
+- 10€ × 0.9% + 0.10€ = **0.19€** (1.9%)
 
 ---
 
 ## 🆕 Что нового в v0.5.0
 
 ### ✅ Миграция на Barion
-- Полная замена Stripe на Barion
+- Полная миграция на Barion
 - Меньше комиссий для локального рынка
 - Простая redirect интеграция
 
@@ -468,7 +465,6 @@ define('WP_DEBUG_LOG', true);
 - IPN для надёжной обработки платежей
 
 ### ❌ Удалено
-- Stripe интеграция
 - Stub-режим (больше не нужен, есть Barion test)
 - Mock geolocation (используйте browser dev tools)
 
@@ -544,7 +540,7 @@ https://www.gnu.org/licenses/old-licenses/gpl-2.0.html
 Версия 0.5.0 (январь 2026)
 
 **Основные изменения:**
-- Barion интеграция вместо Stripe
+- Barion интеграция
 - База данных для транзакций и парковок
 - Админ-панель с историей заказов
 - Production-ready для SK/CZ/HU рынка

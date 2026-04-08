@@ -2,7 +2,7 @@
 
 ## 🎉 Что нового
 
-### ✅ Barion интеграция (вместо Stripe)
+### ✅ Barion интеграция
 - Локальная платёжная система для SK/CZ/HU
 - Меньше комиссий (0.9% вместо 1.4%)
 - Простой redirect flow
@@ -104,7 +104,7 @@ composer require barion/barion-web-php
 
 ## 🔧 Изменения в коде
 
-### Удалено (Stripe)
+### Удалено legacy-платёжное ядро
 ```php
 const OPT_PK   = 'zp_stripe_pk';        // ❌ Удалено
 const OPT_SK   = 'zp_stripe_sk';        // ❌ Удалено

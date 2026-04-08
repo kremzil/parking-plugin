@@ -212,7 +212,7 @@ define('WP_DEBUG_DISPLAY', false);
 ## 📞 Нужна помощь?
 
 - Документация: [README.md](README.md)
-- Миграция со Stripe: [BARION_MIGRATION.md](BARION_MIGRATION.md)
+- Архив перехода на Barion: [BARION_MIGRATION.md](BARION_MIGRATION.md)
 - Что нового: [CHANGELOG_v0.5.0.md](CHANGELOG_v0.5.0.md)
 - Barion Docs: https://docs.barion.com/
 

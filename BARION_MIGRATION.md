@@ -1,6 +1,6 @@
-# Migrácia zo Stripe na Barion
+# Zavedenie Barion platieb
 
-Tento dokument popisuje kroky pre prechod z platobnej brány Stripe na Barion.
+Tento dokument popisuje kroky pre zavedenie platobnej brány Barion a poznámky k prechodu zo staršieho riešenia.
 
 ## 📋 Prečo Barion?
 
@@ -240,9 +240,9 @@ register_activation_hook(__FILE__, function() {
 
 ## 🔧 Rozdiely v používaní
 
-### Stripe (predtým)
+### Legacy checkout (predtým)
 ```javascript
-// Frontend: Stripe Elements embedding
+// Frontend: embedded card flow
 const elements = stripe.elements();
 const card = elements.create('card');
 card.mount('#card-element');
@@ -255,7 +255,7 @@ const result = await createBarionPayment();
 window.location.href = result.redirectUrl; // → Barion stránka
 ```
 
-### Stripe (webhook)
+### Legacy webhook
 ```php
 $event = \Stripe\Webhook::constructEvent($payload, $sig, $secret);
 ```
@@ -271,7 +271,7 @@ if ($state['status'] === 'Succeeded') { /* OK */ }
 ## ⚠️ Migračné poznámky
 
 ### Čo sa mení:
-- ❌ Odstránené: Stripe SDK, publishableKey, Payment Elements
+- ❌ Odstránené: legacy SDK, publishableKey, Payment Elements
 - ✅ Pridané: Barion SDK, POSKey, redirect flow
 - ✅ Pridané: Order number tracking
 - ✅ Pridané: Barion Wallet podpora
@@ -284,26 +284,24 @@ if ($state['status'] === 'Succeeded') { /* OK */ }
 - ✅ Admin panel (pridané sekcie)
 
 ### Backward compatibility:
-- Existujúce Stripe transakcie zostávajú v histórii
+- Existujúce staršie transakcie zostávajú v histórii
 - Môžete spustiť oba systémy paralelne (prepínač v admin)
 - Pri migrácii nenastane downtime
 
 ---
 
-## 📊 Porovnanie poplatkov
+## 📊 Referenčné porovnanie poplatkov
 
-| | Stripe | Barion |
-|---|---|---|
-| Domáce karty (SK/CZ/HU) | 1.4% + 0.25€ | **0.9% + 0.10€** |
-| EU karty | 1.4% + 0.25€ | 1.5% + 0.10€ |
-| Barion Wallet | - | **0.5%** |
-| Mesačný poplatok | 0€ | 0€ |
-| Vratky | 0€ | 0€ |
+| Parameter | Barion |
+|---|---|
+| Domáce karty (SK/CZ/HU) | **0.9% + 0.10€** |
+| EU karty | 1.5% + 0.10€ |
+| Barion Wallet | **0.5%** |
+| Mesačný poplatok | 0€ |
+| Vratky | 0€ |
 
 **Príklad:** Platba 10€
-- Stripe: 10€ × 1.4% + 0.25€ = **0.39€** (3.9%)
 - Barion: 10€ × 0.9% + 0.10€ = **0.19€** (1.9%)
-- **Úspora: 0.20€ na transakciu (51%!)**
 
 ---
 

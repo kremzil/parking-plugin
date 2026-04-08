@@ -92,7 +92,7 @@ Use Barion test environment with test card: 5559 0574 4061 2346, exp 12/28, CVC 
 == Changelog ==
 
 = 0.5.0 (2026-01-27) =
-* **Major Update:** Migrated from Stripe to Barion payment gateway
+* **Major Update:** Barion payment gateway rollout
 * Added: Database tables for transactions and active parkings
 * Added: Admin dashboard for order history
 * Added: Search and filter functionality in admin
@@ -100,7 +100,6 @@ Use Barion test environment with test card: 5559 0574 4061 2346, exp 12/28, CVC 
 * Added: Automatic table creation on plugin activation
 * Improved: Server-side price validation
 * Improved: Idempotency protection against double charges
-* Removed: Stripe integration
 * Removed: Stub payment mode (use Barion test instead)
 
 = 0.4.5 =
