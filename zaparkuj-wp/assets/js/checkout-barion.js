@@ -47,6 +47,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const elCustomTgl  = document.getElementById('zp-custom-time');
   const elCustomWrap = document.getElementById('zp-duration-custom');
   const elDurDisplay = document.getElementById('zp-duration-display');
+  const elZoneRules  = document.getElementById('zp-zone-rules');
+  const elDurNote    = document.getElementById('zp-duration-note');
   let elLang       = document.getElementById('zp-lang');
   let elLangWrap   = document.getElementById('zp-lang-switcher');
 
@@ -169,6 +171,161 @@ document.addEventListener('DOMContentLoaded', () => {
     return tpl(t('duration_minutes', '{{minutes}} min'), { minutes: m });
   }
 
+  const ZONE_SCHEDULES = {
+    A1: { days: [1,2,3,4,5,6], start: [0, 0], end: [24, 0], maxPerDay: null },
+    A2: { days: [1,2,3,4,5,6], start: [0, 0], end: [24, 0], maxPerDay: null },
+    BN: { days: [1,2,3,4,5], start: [7, 30], end: [18, 0], maxPerDay: null },
+    N:  { days: [1,2,3,4,5], start: [7, 30], end: [18, 0], maxPerDay: null },
+    B:  { days: [1,2,3,4,5,6,7], start: [7, 30], end: [16, 0], maxPerDay: 240 }
+  };
+
+  function dayStartLocal(date){
+    const d = new Date(date.getTime());
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+  function ymdLocal(date){
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, '0');
+    const d = String(date.getDate()).padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  function isoDowLocal(date){
+    const dow = date.getDay(); // 0=Sun
+    return dow === 0 ? 7 : dow;
+  }
+  function getWindowsForDay(zoneId, dayStart){
+    const id = String(zoneId || '').toUpperCase();
+    const rule = ZONE_SCHEDULES[id];
+    if (!rule) return [];
+    if (!rule.days.includes(isoDowLocal(dayStart))) return [];
+
+    const start = new Date(dayStart.getTime());
+    start.setHours(rule.start[0], rule.start[1], 0, 0);
+    const end = new Date(dayStart.getTime());
+    if (rule.end[0] === 24 && rule.end[1] === 0) {
+      end.setDate(end.getDate() + 1);
+      end.setHours(0, 0, 0, 0);
+    } else {
+      end.setHours(rule.end[0], rule.end[1], 0, 0);
+    }
+    if (end <= start) return [];
+    return [{ start, end }];
+  }
+  function computeValidityEnd(zoneId, startDate){
+    const plus24 = new Date(startDate.getTime() + (24 * 60 * 60 * 1000));
+    const nextDay = dayStartLocal(startDate);
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextWindows = getWindowsForDay(zoneId, nextDay);
+    if (!nextWindows.length) {
+      return new Date(startDate.getTime() + (48 * 60 * 60 * 1000));
+    }
+    const nextEndTs = Math.max.apply(null, nextWindows.map(w => w.end.getTime()));
+    return new Date(Math.min(plus24.getTime(), nextEndTs));
+  }
+
+  function calcPriceCentsByDays(z, dailyPaid){
+    if (!z || !dailyPaid) return null;
+    if (typeof z.base_30 === 'number') {
+      const base = z.base_30;
+      const cap = (typeof z.daily_cap === 'number' && z.daily_cap >= 0) ? z.daily_cap : null;
+      let total = 0;
+      Object.keys(dailyPaid).forEach((d) => {
+        const mins = Math.max(0, parseInt(dailyPaid[d], 10) || 0);
+        if (!mins) return;
+        let dayPrice = Math.ceil(mins / 30) * base;
+        if (cap !== null) dayPrice = Math.min(dayPrice, cap);
+        total += dayPrice;
+      });
+      return Math.round(total * 100);
+    }
+
+    let sum = 0;
+    Object.keys(dailyPaid).forEach((d) => { sum += Math.max(0, parseInt(dailyPaid[d], 10) || 0); });
+    if (!sum) return null;
+    const step = Math.max(1, z.billing_increment || 15);
+    const minc = Math.max(0, z.min_charge_minutes || 0);
+    const mm = Math.max(minc, Math.ceil(sum / step) * step);
+    const rate = z.rate_per_min || (z.rate_per_hour ? (z.rate_per_hour / 60) : 0);
+    return Math.round(mm * rate * 100);
+  }
+
+  function buildClientQuote(zoneId, requestedMinutes, z){
+    const id = String(zoneId || '').toUpperCase();
+    const requested = Math.max(0, parseInt(requestedMinutes, 10) || 0);
+    if (!id || !z || !requested) {
+      return { requestedMinutes: requested, effectiveMinutes: 0, cents: null, adjustmentReason: null, adjustmentText: null, dailyPaid: {} };
+    }
+    const now = new Date();
+    const validityEnd = computeValidityEnd(id, now);
+    const dailyPaid = {};
+    let remaining = requested;
+    let coverageEnd = now;
+    let chargeWindowSeen = false;
+    let bLimitHit = false;
+    const cursorDay = dayStartLocal(now);
+
+    while (remaining > 0 && cursorDay.getTime() < validityEnd.getTime()) {
+      const windows = getWindowsForDay(id, cursorDay);
+      const dayKey = ymdLocal(cursorDay);
+      if (windows.length) chargeWindowSeen = true;
+
+      let dayRemaining = Number.POSITIVE_INFINITY;
+      if (id === 'B') {
+        const already = Math.max(0, parseInt(dailyPaid[dayKey], 10) || 0);
+        dayRemaining = Math.max(0, 240 - already);
+        if (dayRemaining <= 0 && windows.length) bLimitHit = true;
+      }
+
+      for (const w of windows) {
+        if (remaining <= 0) break;
+        if (dayRemaining <= 0) {
+          if (id === 'B') bLimitHit = true;
+          break;
+        }
+        const segStartTs = Math.max(now.getTime(), w.start.getTime());
+        const segEndTs = Math.min(validityEnd.getTime(), w.end.getTime());
+        if (segEndTs <= segStartTs) continue;
+        const available = Math.floor((segEndTs - segStartTs) / 60000);
+        if (available < 1) continue;
+        const take = Math.min(available, remaining, dayRemaining);
+        if (take < 1) continue;
+        dailyPaid[dayKey] = (dailyPaid[dayKey] || 0) + take;
+        remaining -= take;
+        dayRemaining -= take;
+        coverageEnd = new Date(Math.max(coverageEnd.getTime(), segStartTs + (take * 60000)));
+      }
+
+      cursorDay.setDate(cursorDay.getDate() + 1);
+    }
+
+    const effective = Math.max(0, requested - remaining);
+    let adjustmentReason = null;
+    if (effective <= 0) {
+      adjustmentReason = bLimitHit ? 'zone_b_daily_limit' : 'no_chargeable_minutes';
+    } else if (effective < requested) {
+      if (bLimitHit) adjustmentReason = 'zone_b_daily_limit';
+      else adjustmentReason = chargeWindowSeen ? 'validity_window_limit' : 'outside_paid_window';
+    }
+
+    const reasonMap = {
+      zone_b_daily_limit: t('adjustment_zone_b_daily_limit', 'V zóne B je limit 4 hodiny denne.'),
+      validity_window_limit: t('adjustment_validity_window_limit', 'Čas bol skrátený podľa pravidiel platnosti lístka.'),
+      outside_paid_window: t('adjustment_outside_paid_window', 'Mimo doby spoplatnenia sa účtuje len čas v aktívnom okne.'),
+      no_chargeable_minutes: t('err_no_chargeable_minutes', 'V zvolenom čase nie sú k dispozícii spoplatnené minúty.')
+    };
+
+    return {
+      requestedMinutes: requested,
+      effectiveMinutes: effective,
+      cents: calcPriceCentsByDays(z, dailyPaid),
+      adjustmentReason,
+      adjustmentText: adjustmentReason ? (reasonMap[adjustmentReason] || null) : null,
+      dailyPaid,
+      coverageEnd
+    };
+  }
+
   function zoneRatePerHour(z){
     if (!z) return null;
     if (typeof z.base_30 === 'number') return z.base_30 * 2;
@@ -177,30 +334,34 @@ document.addEventListener('DOMContentLoaded', () => {
     return null;
   }
 
-  function calcPriceCents(z, minutes){
-    const m = parseInt(minutes, 10);
-    if (!z || !m) return null;
+  function zoneScheduleText(zoneId){
+    const id = String(zoneId || '').toUpperCase();
+    if (id === 'A1') return t('zone_schedule_a1', 'A1: PO - SO 00:00-24:00');
+    if (id === 'A2') return t('zone_schedule_a2', 'A2: PO - SO 00:00-24:00');
+    if (id === 'BN') return t('zone_schedule_bn', 'BN: PO - PI 07:30-18:00');
+    if (id === 'N') return t('zone_schedule_n', 'N: PO - PI 07:30-18:00');
+    if (id === 'B') return t('zone_schedule_b', 'B: PO - NE 07:30-16:00');
+    return '';
+  }
 
-    let cents = 0;
-    if (typeof z.base_30 === 'number') {
-      const base = z.base_30;
-      const cap = (typeof z.daily_cap === 'number' && z.daily_cap >= 0) ? z.daily_cap : null;
-      const fullDays = Math.floor(m / 1440);
-      const remMin   = m % 1440;
-      const blocks   = Math.ceil(remMin / 30);
-      let partDay    = blocks * base;
-      if (cap !== null) partDay = Math.min(partDay, cap);
-      let total = fullDays * (cap !== null ? cap : (48 * base));
-      total += partDay;
-      cents = Math.round(total * 100);
-    } else {
-      const step = Math.max(1, z.billing_increment || 15);
-      const minc = Math.max(0, z.min_charge_minutes || 0);
-      const mm   = Math.max(minc, Math.ceil(m/step)*step);
-      const rate = z.rate_per_min || (z.rate_per_hour ? (z.rate_per_hour/60) : 0);
-      cents = Math.round(mm * rate * 100);
+  function renderZoneRules(zoneId){
+    if (!elZoneRules) return;
+    const id = String(zoneId || '').toUpperCase();
+    if (!id) {
+      elZoneRules.innerHTML = '';
+      return;
     }
-    return cents;
+    const lines = [];
+    const schedule = zoneScheduleText(id);
+    if (schedule) lines.push(`<div class="zp-zone-rules-line">${schedule}</div>`);
+    if (id === 'B') {
+      lines.push(`<div class="zp-zone-rules-line">${t('zone_limit_b_daily', 'Max. 4 hod. denne')}</div>`);
+      lines.push(`<div class="zp-zone-rules-note">${t('zone_rules_outside_paid', 'Mimo doby spoplatnenia možno parkovať len s rezidentskou kartou alebo lokalitnou abonentnou kartou.')}</div>`);
+    }
+    elZoneRules.innerHTML = `
+      <div class="zp-zone-rules-title">${t('zone_rules_title', 'Doba spoplatnenia')}</div>
+      ${lines.join('')}
+    `;
   }
 
   function updateZoneUI(){
@@ -214,6 +375,7 @@ document.addEventListener('DOMContentLoaded', () => {
         ? tpl(t('rate_per_hour', '{{price}} €/hod'), { price: r.toFixed(2) })
         : '—';
     }
+    renderZoneRules(zoneId);
   }
 
   function syncDurationUI(){
@@ -228,10 +390,32 @@ document.addEventListener('DOMContentLoaded', () => {
     });
   }
 
-  function updateSummaryUI(cents){
+  function updateDurationNote(quote){
+    if (!elDurNote) return;
+    const hasAdjust = !!(quote && quote.adjustmentReason && quote.requestedMinutes > quote.effectiveMinutes);
+    if (!hasAdjust) {
+      elDurNote.style.display = 'none';
+      elDurNote.textContent = '';
+      return;
+    }
+    const msg = tpl(
+      t('duration_adjusted_notice', 'Požadovaný čas {{requested}}, účtovaný čas {{effective}}. {{reason}}'),
+      {
+        requested: formatDuration(quote.requestedMinutes),
+        effective: formatDuration(quote.effectiveMinutes),
+        reason: quote.adjustmentText || ''
+      }
+    ).trim();
+    elDurNote.className = quote.effectiveMinutes > 0 ? 'zp-banner is-warn' : 'zp-banner is-bad';
+    elDurNote.textContent = msg;
+    elDurNote.style.display = 'block';
+  }
+
+  function updateSummaryUI(quote){
     const z = getZoneCfg();
     const zoneId = getZoneId();
-    const minutes = parseInt(elMinutes.value, 10) || 0;
+    const minutes = quote ? parseInt(quote.effectiveMinutes, 10) || 0 : 0;
+    const cents = quote ? quote.cents : null;
     if (!elSummary) return;
 
     if (!z || !zoneId || !minutes || cents === null) {
@@ -246,24 +430,31 @@ document.addEventListener('DOMContentLoaded', () => {
     if (elSumTotal) elSumTotal.textContent = (cents/100).toFixed(2) + ' €';
   }
 
-  function updatePayUI(cents){
+  function updatePayUI(quote){
     if (!payBtn) return;
     const zoneId = getZoneId();
-    const minutes = parseInt(elMinutes.value, 10) || 0;
-    const ok = !!zoneId && !!minutes && cents !== null && cents > 0;
+    const requested = parseInt(elMinutes.value, 10) || 0;
+    const cents = quote ? quote.cents : null;
+    const effective = quote ? (parseInt(quote.effectiveMinutes, 10) || 0) : 0;
+    const ok = !!zoneId && !!requested && !!effective && cents !== null && cents > 0;
     payBtn.disabled = !ok;
     const priceStr = ok ? (cents/100).toFixed(2) : '0.00';
     payBtn.textContent = tpl(t('pay_button_price', 'Zaplatiť {{price}} €'), { price: priceStr });
   }
 
+  let lastQuote = null;
   function recalcAll(){
     updateZoneUI();
     syncDurationUI();
     const z = getZoneCfg();
-    const cents = calcPriceCents(z, elMinutes.value);
-    updateSummaryUI(cents);
-    updatePayUI(cents);
-    return cents;
+    const zoneId = getZoneId();
+    const requested = parseInt(elMinutes.value, 10) || 0;
+    const quote = buildClientQuote(zoneId, requested, z);
+    lastQuote = quote;
+    updateDurationNote(quote);
+    updateSummaryUI(quote);
+    updatePayUI(quote);
+    return quote;
   }
 
   // Recalc on duration changes
@@ -327,6 +518,7 @@ document.addEventListener('DOMContentLoaded', () => {
    * Создание платежа в Barion
    */
   async function createBarionPayment() {
+    const quote = recalcAll();
     const body = {
       spz: (elSpz.value || '').trim().toUpperCase(),
       email: (elEmail.value || '').trim(),
@@ -334,7 +526,7 @@ document.addEventListener('DOMContentLoaded', () => {
       minutes: parseInt(elMinutes.value, 10),
       lat: elLat.value ? parseFloat(elLat.value) : null,
       lng: elLng.value ? parseFloat(elLng.value) : null,
-      amount_cents: recalcAll(),
+      amount_cents: quote ? quote.cents : null,
       lang: (cfg && cfg.lang) ? cfg.lang : 'sk'
     };
 
@@ -350,6 +542,9 @@ document.addEventListener('DOMContentLoaded', () => {
     }
     if (!body.minutes || body.minutes < 1) {
       throw new Error(t('err_minutes', 'Vyber trvanie parkovania'));
+    }
+    if (!quote || !quote.effectiveMinutes) {
+      throw new Error(t('err_no_chargeable_minutes', 'V zvolenom čase nie sú k dispozícii spoplatnené minúty.'));
     }
     if (!body.amount_cents || body.amount_cents < 1) {
       throw new Error(t('err_price', 'Nepodarilo sa vypočítať cenu'));

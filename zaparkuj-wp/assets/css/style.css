@@ -285,6 +285,28 @@
   align-items: center;
   gap: 8px;
 }
+.zp-zone-rules{
+  margin-top: 10px;
+  border: 1px solid rgba(0,0,0,0.08);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.7);
+  padding: 10px;
+  color: var(--zp-muted-fg);
+  font-size: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.zp-zone-rules-title{
+  font-weight: 700;
+  color: var(--zp-fg);
+}
+.zp-zone-rules-line{
+  color: var(--zp-fg);
+}
+.zp-zone-rules-note{
+  color: #7c2d12;
+}
 
 .zp-tabs-row{
   display: flex;
@@ -296,7 +318,7 @@
   border-radius: 14px;
   padding: 4px;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   gap: 4px;
 }
 .zp-tab{

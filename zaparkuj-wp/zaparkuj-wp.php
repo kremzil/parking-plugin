@@ -286,18 +286,6 @@ class Zaparkuj_WP_045 {
           <div id="map-frame"></div>
         </div>
 
-        <div class="zp-card">
-          <div class="zp-card-inner">
-            <div class="zp-address">
-              <svg class="zp-icon" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path d="M21 21l-4.3-4.3m1.3-5.2a7 7 0 11-14 0 7 7 0 0114 0z" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-              </svg>
-              <input id="zp-address" class="zp-input" placeholder="<?php echo esc_attr(zp_t('search_address_placeholder')); ?>" autocomplete="off">
-              <div id="zp-address-results" class="zp-dropdown" style="display:none"></div>
-            </div>
-          </div>
-        </div>
-
         <div class="zp-zone">
           <select id="zp-zone-select" aria-label="<?php echo esc_attr(zp_t('select_zone_from_list')); ?>">
             <option value=""><?php echo esc_html(zp_t('select_zone_from_list')); ?></option>
@@ -341,6 +329,7 @@ class Zaparkuj_WP_045 {
                 <span id="zp-zone-rate">—</span>
               </span>
             </div>
+            <div id="zp-zone-rules" class="zp-zone-rules"></div>
           </div>
           <div class="zp-card-inner">
             <form id="zp-form" class="zp-form">
@@ -387,6 +376,7 @@ class Zaparkuj_WP_045 {
                   <button type="button" class="zp-tab is-active" data-min="60"><?php echo esc_html(zp_t('duration_60')); ?></button>
                   <button type="button" class="zp-tab" data-min="120"><?php echo esc_html(zp_t('duration_120')); ?></button>
                   <button type="button" class="zp-tab" data-min="240"><?php echo esc_html(zp_t('duration_240')); ?></button>
+                  <button type="button" class="zp-tab" data-min="1440"><?php echo esc_html(zp_t('duration_1440')); ?></button>
                 </div>
                 <div id="zp-duration-custom" style="display:none;margin-top:10px;">
                   <div class="zp-summary" style="background:rgba(3,2,19,0.06);">
@@ -405,6 +395,7 @@ class Zaparkuj_WP_045 {
                   </div>
                 </div>
               </div>
+              <div id="zp-duration-note" class="zp-banner is-warn" style="display:none;"></div>
 
               <div class="zp-summary" id="zp-summary" style="display:none;">
                 <div class="zp-summary-row">
@@ -558,12 +549,292 @@ class Zaparkuj_WP_045 {
     return is_array($arr) ? $arr : ['zones'=>[]];
   }
 
-  public static function calc_price_cents($zone_id, $minutes){
+  private static function wp_tz(){
+    if (function_exists('wp_timezone')) return wp_timezone();
+    $tz = get_option('timezone_string', '');
+    if ($tz) return new DateTimeZone($tz);
+    $offset = (float)get_option('gmt_offset', 0);
+    $hours = (int)$offset;
+    $minutes = (int)round(abs($offset - $hours) * 60);
+    $sign = $offset >= 0 ? '+' : '-';
+    return new DateTimeZone(sprintf('%s%02d:%02d', $sign, abs($hours), $minutes));
+  }
+
+  private static function dt_from_ts($ts){
+    return (new DateTimeImmutable('@' . intval($ts)))->setTimezone(self::wp_tz());
+  }
+
+  private static function find_zone_cfg($zone_id){
     $zones = self::get_tariffs_array()['zones'];
-    $z = null;
     foreach($zones as $zz){
-      if (strtoupper($zz['id']) === strtoupper($zone_id)) { $z = $zz; break; }
+      if (strtoupper((string)($zz['id'] ?? '')) === strtoupper((string)$zone_id)) return $zz;
     }
+    return null;
+  }
+
+  public static function get_zone_schedule_rules($zone_id = null){
+    $rules = [
+      'A1' => ['days' => [1,2,3,4,5,6], 'start' => '00:00', 'end' => '24:00', 'max_minutes_per_day' => null],
+      'A2' => ['days' => [1,2,3,4,5,6], 'start' => '00:00', 'end' => '24:00', 'max_minutes_per_day' => null],
+      'BN' => ['days' => [1,2,3,4,5],   'start' => '07:30', 'end' => '18:00', 'max_minutes_per_day' => null],
+      'N'  => ['days' => [1,2,3,4,5],   'start' => '07:30', 'end' => '18:00', 'max_minutes_per_day' => null],
+      'B'  => ['days' => [1,2,3,4,5,6,7], 'start' => '07:30', 'end' => '16:00', 'max_minutes_per_day' => 240],
+    ];
+    if ($zone_id === null) return $rules;
+    $id = strtoupper(trim((string)$zone_id));
+    return $rules[$id] ?? null;
+  }
+
+  private static function zone_windows_for_day($zone_id, DateTimeImmutable $day_start){
+    $rule = self::get_zone_schedule_rules($zone_id);
+    if (!$rule || !isset($rule['days']) || !is_array($rule['days'])) return [];
+
+    $dow = intval($day_start->format('N')); // 1=Mon ... 7=Sun
+    if (!in_array($dow, $rule['days'], true)) return [];
+
+    list($sh, $sm) = array_map('intval', explode(':', (string)$rule['start']));
+    $window_start = $day_start->setTime($sh, $sm, 0);
+
+    $end_raw = (string)$rule['end'];
+    if ($end_raw === '24:00') {
+      $window_end = $day_start->modify('+1 day')->setTime(0, 0, 0);
+    } else {
+      list($eh, $em) = array_map('intval', explode(':', $end_raw));
+      $window_end = $day_start->setTime($eh, $em, 0);
+    }
+    if ($window_end <= $window_start) return [];
+
+    return [[
+      $window_start->getTimestamp(),
+      $window_end->getTimestamp()
+    ]];
+  }
+
+  private static function compute_validity_end_ts($zone_id, $start_ts){
+    $start = self::dt_from_ts($start_ts);
+    $plus24 = $start->modify('+24 hours');
+
+    $next_day_start = $start->setTime(0, 0, 0)->modify('+1 day');
+    $next_day_windows = self::zone_windows_for_day($zone_id, $next_day_start);
+
+    // If the whole next day is free of charging, daily ticket is valid for 48h.
+    if (empty($next_day_windows)) {
+      return $start->modify('+48 hours')->getTimestamp();
+    }
+
+    $next_day_last_end = 0;
+    foreach ($next_day_windows as $w) {
+      if (isset($w[1]) && intval($w[1]) > $next_day_last_end) $next_day_last_end = intval($w[1]);
+    }
+    if ($next_day_last_end <= 0) return $plus24->getTimestamp();
+
+    return min($plus24->getTimestamp(), $next_day_last_end);
+  }
+
+  private static function get_b_history_minutes_by_day($spz, $from_ts, $to_ts){
+    $spz = strtoupper(trim((string)$spz));
+    if (!$spz) return [];
+
+    global $wpdb;
+    $table = $wpdb->prefix . 'zp_transactions';
+
+    $from = self::dt_from_ts($from_ts)->setTime(0, 0, 0)->format('Y-m-d H:i:s');
+    $to = self::dt_from_ts($to_ts)->setTime(0, 0, 0)->modify('+1 day')->format('Y-m-d H:i:s');
+
+    $sql = $wpdb->prepare(
+      "SELECT DATE(COALESCE(paid_at, created_at)) AS d, SUM(minutes) AS mins
+       FROM $table
+       WHERE status = %s
+         AND UPPER(zone_id) = %s
+         AND UPPER(spz) = %s
+         AND COALESCE(paid_at, created_at) >= %s
+         AND COALESCE(paid_at, created_at) < %s
+       GROUP BY DATE(COALESCE(paid_at, created_at))",
+      'completed',
+      'B',
+      $spz,
+      $from,
+      $to
+    );
+    $rows = $wpdb->get_results($sql, ARRAY_A);
+    if (!is_array($rows)) return [];
+
+    $out = [];
+    foreach ($rows as $row) {
+      $d = isset($row['d']) ? (string)$row['d'] : '';
+      if (!$d) continue;
+      $out[$d] = intval($row['mins'] ?? 0);
+    }
+    return $out;
+  }
+
+  private static function calc_price_cents_for_daily_breakdown($zone_cfg, $daily_paid_minutes){
+    if (!is_array($zone_cfg)) return 0;
+    if (!is_array($daily_paid_minutes) || !$daily_paid_minutes) return 0;
+
+    if (isset($zone_cfg['base_30'])) {
+      $base = floatval($zone_cfg['base_30']);
+      $cap  = isset($zone_cfg['daily_cap']) && $zone_cfg['daily_cap'] !== null ? floatval($zone_cfg['daily_cap']) : null;
+      $total = 0.0;
+      foreach ($daily_paid_minutes as $mins) {
+        $m = max(0, intval($mins));
+        if ($m < 1) continue;
+        $blocks = (int)ceil($m / 30);
+        $day_total = $blocks * $base;
+        if ($cap !== null) $day_total = min($day_total, $cap);
+        $total += $day_total;
+      }
+      return (int)round($total * 100);
+    }
+
+    $sum_minutes = 0;
+    foreach ($daily_paid_minutes as $mins) $sum_minutes += max(0, intval($mins));
+    if ($sum_minutes < 1) return 0;
+    $minc = max(0, isset($zone_cfg['min_charge_minutes']) ? intval($zone_cfg['min_charge_minutes']) : 0);
+    $step = max(1, isset($zone_cfg['billing_increment']) ? intval($zone_cfg['billing_increment']) : 15);
+    $m    = max($minc, (int)ceil($sum_minutes / $step) * $step);
+    $rate_per_min = isset($zone_cfg['rate_per_min']) ? floatval($zone_cfg['rate_per_min']) : ( isset($zone_cfg['rate_per_hour']) ? (floatval($zone_cfg['rate_per_hour'])/60.0) : 0.0 );
+    return (int)round($m * $rate_per_min * 100);
+  }
+
+  public static function build_paid_quote($zone_id, $requested_paid_minutes, $spz = '', $start_ts = null, $lang = null, $opts = []){
+    $zone_id = strtoupper(trim((string)$zone_id));
+    $requested = max(0, intval($requested_paid_minutes));
+    $start_ts = is_numeric($start_ts) ? intval($start_ts) : current_time('timestamp', true);
+    $lang = $lang ?: zp_get_lang();
+    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = 'sk';
+
+    $zone_cfg = self::find_zone_cfg($zone_id);
+    if (!$zone_cfg || $requested < 1) {
+      return [
+        'requested_minutes' => $requested,
+        'effective_minutes' => 0,
+        'amount_cents' => 0,
+        'daily_breakdown' => [],
+        'adjustment_reason' => $requested < 1 ? 'invalid_minutes' : 'invalid_zone',
+        'adjustment_text' => $requested < 1 ? zp_t('err_minutes_required', $lang) : zp_t('err_zone_required', $lang),
+        'start_ts' => $start_ts,
+        'validity_end_ts' => $start_ts,
+        'coverage_end_ts' => $start_ts,
+      ];
+    }
+
+    $validity_end_ts = self::compute_validity_end_ts($zone_id, $start_ts);
+    if ($validity_end_ts <= $start_ts) {
+      return [
+        'requested_minutes' => $requested,
+        'effective_minutes' => 0,
+        'amount_cents' => 0,
+        'daily_breakdown' => [],
+        'adjustment_reason' => 'no_chargeable_minutes',
+        'adjustment_text' => zp_t('err_no_chargeable_minutes', $lang),
+        'start_ts' => $start_ts,
+        'validity_end_ts' => $validity_end_ts,
+        'coverage_end_ts' => $start_ts,
+      ];
+    }
+
+    $include_b_history = !isset($opts['include_b_history']) || !!$opts['include_b_history'];
+    $b_history = [];
+    if ($zone_id === 'B' && $include_b_history) {
+      $b_history = self::get_b_history_minutes_by_day($spz, $start_ts, $validity_end_ts);
+    }
+
+    $remaining = $requested;
+    $coverage_end_ts = $start_ts;
+    $daily_paid = [];
+    $charge_window_seen = false;
+    $b_limit_hit = false;
+    $cursor_day = self::dt_from_ts($start_ts)->setTime(0, 0, 0);
+
+    while ($remaining > 0 && $cursor_day->getTimestamp() < $validity_end_ts) {
+      $date_key = $cursor_day->format('Y-m-d');
+      $windows = self::zone_windows_for_day($zone_id, $cursor_day);
+      if (!empty($windows)) $charge_window_seen = true;
+
+      $day_remaining = PHP_INT_MAX;
+      if ($zone_id === 'B') {
+        $history_mins = intval($b_history[$date_key] ?? 0);
+        $already_allocated = intval($daily_paid[$date_key] ?? 0);
+        $day_remaining = max(0, 240 - $history_mins - $already_allocated);
+        if ($day_remaining <= 0 && !empty($windows)) $b_limit_hit = true;
+      }
+
+      foreach ($windows as $w) {
+        if ($remaining <= 0) break;
+        if ($day_remaining <= 0) {
+          if ($zone_id === 'B') $b_limit_hit = true;
+          break;
+        }
+        $seg_start = max($start_ts, intval($w[0] ?? 0));
+        $seg_end = min($validity_end_ts, intval($w[1] ?? 0));
+        if ($seg_end <= $seg_start) continue;
+
+        $available = (int)floor(($seg_end - $seg_start) / 60);
+        if ($available < 1) continue;
+
+        $take = min($available, $remaining, $day_remaining);
+        if ($take < 1) continue;
+
+        $daily_paid[$date_key] = intval($daily_paid[$date_key] ?? 0) + $take;
+        $remaining -= $take;
+        $day_remaining -= $take;
+        $coverage_end_ts = max($coverage_end_ts, $seg_start + ($take * 60));
+      }
+
+      $cursor_day = $cursor_day->modify('+1 day');
+    }
+
+    $effective = $requested - $remaining;
+    $adjustment_reason = null;
+    if ($effective <= 0) {
+      $adjustment_reason = $b_limit_hit ? 'zone_b_daily_limit' : 'no_chargeable_minutes';
+      $coverage_end_ts = $start_ts;
+    } elseif ($effective < $requested) {
+      if ($b_limit_hit) $adjustment_reason = 'zone_b_daily_limit';
+      else $adjustment_reason = $charge_window_seen ? 'validity_window_limit' : 'outside_paid_window';
+    }
+
+    $reason_to_text = [
+      'zone_b_daily_limit' => zp_t('adjustment_zone_b_daily_limit', $lang),
+      'validity_window_limit' => zp_t('adjustment_validity_window_limit', $lang),
+      'outside_paid_window' => zp_t('adjustment_outside_paid_window', $lang),
+      'no_chargeable_minutes' => zp_t('err_no_chargeable_minutes', $lang),
+      'invalid_minutes' => zp_t('err_minutes_required', $lang),
+      'invalid_zone' => zp_t('err_zone_required', $lang),
+    ];
+
+    ksort($daily_paid);
+    $daily_breakdown = [];
+    foreach ($daily_paid as $date => $mins) {
+      $row = ['date' => $date, 'minutes' => intval($mins)];
+      if ($zone_id === 'B') $row['history_minutes'] = intval($b_history[$date] ?? 0);
+      $daily_breakdown[] = $row;
+    }
+
+    return [
+      'requested_minutes' => $requested,
+      'effective_minutes' => max(0, $effective),
+      'amount_cents' => self::calc_price_cents_for_daily_breakdown($zone_cfg, $daily_paid),
+      'daily_breakdown' => $daily_breakdown,
+      'adjustment_reason' => $adjustment_reason,
+      'adjustment_text' => $adjustment_reason && isset($reason_to_text[$adjustment_reason]) ? $reason_to_text[$adjustment_reason] : null,
+      'start_ts' => $start_ts,
+      'validity_end_ts' => $validity_end_ts,
+      'coverage_end_ts' => $coverage_end_ts,
+    ];
+  }
+
+  public static function compute_effective_parking_end_ts($zone_id, $paid_minutes, $start_ts, $spz = ''){
+    $minutes = max(0, intval($paid_minutes));
+    $start_ts = intval($start_ts);
+    if ($minutes < 1 || $start_ts < 1) return $start_ts;
+    $quote = self::build_paid_quote($zone_id, $minutes, $spz, $start_ts, null, ['include_b_history' => false]);
+    return intval($quote['coverage_end_ts'] ?? $start_ts);
+  }
+
+  public static function calc_price_cents($zone_id, $minutes){
+    $z = self::find_zone_cfg($zone_id);
     if (!$z || !$minutes) return 0;
     if (isset($z['base_30'])) {
       $base = floatval($z['base_30']);
@@ -992,6 +1263,8 @@ class Zaparkuj_WP_045 {
     $minutes = intval($p['minutes'] ?? 0);
     $lat     = isset($p['lat']) ? floatval($p['lat']) : null;
     $lng     = isset($p['lng']) ? floatval($p['lng']) : null;
+    $lang    = isset($p['lang']) ? strtolower(sanitize_text_field($p['lang'])) : zp_get_lang();
+    if (!in_array($lang, ['sk','en','pl','hu','sv','zh'], true)) $lang = zp_get_lang();
     
     // Validácia
     if (!$spz || strlen($spz) < 2) {
@@ -1006,12 +1279,17 @@ class Zaparkuj_WP_045 {
     if (!$minutes || $minutes < 1) {
       return new WP_Error('invalid_minutes', zp_t('err_minutes_required'), ['status'=>422]);
     }
-    
-    // Prepočítať cenu na serveri (bezpečnosť)
-    $amount_cents = self::calc_price_cents($zone_id, $minutes);
-    
+
+    // Server-side authoritative quote: requested minutes are treated as target paid minutes.
+    $quote = self::build_paid_quote($zone_id, $minutes, $spz, current_time('timestamp', true), $lang, ['include_b_history' => true]);
+    $effective_minutes = intval($quote['effective_minutes'] ?? 0);
+    if ($effective_minutes < 1) {
+      return new WP_Error('no_chargeable_minutes', zp_t('err_no_chargeable_minutes', $lang), ['status'=>422]);
+    }
+    $amount_cents = intval($quote['amount_cents'] ?? 0);
+
     if ($amount_cents < 50) {
-      return new WP_Error('amount_too_low', zp_t('err_amount_min'), ['status'=>422]);
+      return new WP_Error('amount_too_low', zp_t('err_amount_min', $lang), ['status'=>422]);
     }
     
     // Kontrola Barion nastavení
@@ -1025,10 +1303,13 @@ class Zaparkuj_WP_045 {
         'spz' => $spz,
         'email' => $email,
         'zone_id' => $zone_id,
-        'minutes' => $minutes,
+        'minutes' => $effective_minutes,
         'lat' => $lat,
         'lng' => $lng,
         'amount_cents' => $amount_cents,
+        'requested_minutes' => $minutes,
+        'effective_minutes' => $effective_minutes,
+        'adjustment_reason' => $quote['adjustment_reason'] ?? null,
         'lang' => $lang
       ]);
       
@@ -1041,7 +1322,11 @@ class Zaparkuj_WP_045 {
         'paymentId' => $result['paymentId'],
         'redirectUrl' => $result['redirectUrl'],
         'orderNumber' => $result['orderNumber'],
-        'amount_eur' => $amount_cents / 100
+        'amount_eur' => $amount_cents / 100,
+        'requested_minutes' => $minutes,
+        'effective_minutes' => $effective_minutes,
+        'adjustment_reason' => $quote['adjustment_reason'] ?? null,
+        'adjustment_text' => $quote['adjustment_text'] ?? null
       ], 200);
       
     } catch (Exception $e) {

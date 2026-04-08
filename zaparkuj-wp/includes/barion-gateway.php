@@ -90,10 +90,13 @@ class ZP_Barion_Gateway {
         'spz' => $data['spz'],
         'email' => $data['email'],
         'zone_id' => $data['zone_id'],
-        'minutes' => $data['minutes'],
+        'requested_minutes' => isset($data['requested_minutes']) ? intval($data['requested_minutes']) : intval($data['minutes']),
+        'effective_minutes' => isset($data['effective_minutes']) ? intval($data['effective_minutes']) : intval($data['minutes']),
+        'minutes' => isset($data['effective_minutes']) ? intval($data['effective_minutes']) : intval($data['minutes']),
         'lat' => isset($data['lat']) ? $data['lat'] : null,
         'lng' => isset($data['lng']) ? $data['lng'] : null,
         'amount_cents' => $data['amount_cents'],
+        'adjustment_reason' => isset($data['adjustment_reason']) ? (string)$data['adjustment_reason'] : null,
         'created_at' => current_time('mysql'),
         'lang' => $lang
       ];
@@ -129,6 +132,8 @@ class ZP_Barion_Gateway {
       $pmt->FundingSources = [FundingSourceType::All];
       $pmt->PaymentRequestId = $order_number;
       $pmt->OrderNumber = $order_number;
+      // Pre-fill customer email in Barion checkout form.
+      $pmt->PayerHint = isset($data['email']) ? trim((string)$data['email']) : null;
       $pmt->Currency = Currency::EUR;
       $pmt->Transactions = [$trans];
       $pmt->Locale = UILocale::SK; // Словацкий интерфейс
@@ -343,7 +348,16 @@ class ZP_Barion_Gateway {
     // Создать активную парковку
     if ($transaction_id) {
       $started_at = current_time('mysql');
-      $expires_at = date('Y-m-d H:i:s', strtotime($started_at) + ($order_data['minutes'] * 60));
+      $start_ts = current_time('timestamp', true);
+      $effective_minutes = intval($order_data['minutes'] ?? 0);
+      $expires_ts = Zaparkuj_WP_045::compute_effective_parking_end_ts(
+        $order_data['zone_id'] ?? '',
+        $effective_minutes,
+        $start_ts,
+        $order_data['spz'] ?? ''
+      );
+      if ($expires_ts <= $start_ts) $expires_ts = $start_ts + ($effective_minutes * 60);
+      $expires_at = wp_date('Y-m-d H:i:s', $expires_ts);
 
       $has_parking = $wpdb->get_var($wpdb->prepare(
         "SELECT id FROM $table_parkings WHERE transaction_id = %d LIMIT 1",

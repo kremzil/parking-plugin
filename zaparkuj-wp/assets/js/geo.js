@@ -181,6 +181,11 @@
     if (!IS_OSM) return;
     const el = document.getElementById('map-frame');
     if (!el) return;
+    // Fail gracefully if Leaflet CDN is blocked/unavailable.
+    if (typeof window.L === 'undefined' || typeof window.L.map !== 'function') {
+      console.warn('Leaflet is not available.');
+      return;
+    }
     if (!_map){
       _map = L.map('map-frame').setView([lat,lng], 18);
       _map.on('click', function(e){ if(_pickActive){ _pickActive=false; afterPosition(+e.latlng.lat.toFixed(6), +e.latlng.lng.toFixed(6)); setHelpLL(e.latlng.lat, e.latlng.lng, 'manual'); const el = document.getElementById('map-frame'); if (el) el.style.cursor=''; } });
@@ -189,9 +194,7 @@
       }).addTo(_map);
       // Geocoder (Leaflet Control Geocoder via Nominatim)
       try {
-        // If we have a dedicated address search input, avoid duplicating search UI on the map.
-        const hasExternalSearch = !!document.getElementById('zp-address');
-        if (!hasExternalSearch && L.Control && L.Control.geocoder) {
+        if (L.Control && typeof L.Control.geocoder === 'function') {
           L.Control.geocoder({ defaultMarkGeocode:false, placeholder:t('geocoder_placeholder', 'Hľadať adresu…') })
             .on('markgeocode', function(e){
               var ll = e.geocode.center;
