@@ -75,7 +75,8 @@ ZAPARKUJ/plugin/
 ├── README.md                              # Этот файл
 ├── homepage.html                          # Шаблон главной страницы
 ├── zones-drawer.html                      # Инструмент для рисования зон
-├── zones.for_plugin.remapped.geojson      # GeoJSON с полигонами зон
+├── zones.for_plugin.remapped.geojson      # GeoJSON с полигонами зон (ручная версия)
+├── zones.official.geojson                 # GeoJSON из официального KML, совместимый с плагином
 ├── tariffs-kosice-remapped.json           # Пример тарифов (Кошице)
 │
 └── zaparkuj-wp/
@@ -151,6 +152,12 @@ composer require barion/barion-web-php
 | **Tariffs JSON** | JSON с тарифами |
 
 6. Нажмите **Uložiť nastavenia**
+
+### Официальные зоны Кошице
+
+Файл `zones.official.geojson` сгенерирован из официального KML в `API/reexternreiadosozaatieintegranhoprocesu.zip`.
+В нем `properties.id` оставлен совместимым с логикой плагина (`A1`, `A2`, `BN`, `N`, `B`), а официальный ID конкретного участка сохранен в `properties.official_id`.
+Дополнительные официальные поля (`official_name`, `locality`, `rate_text`, `daily_cap_text`, `paid_hours`, `free_days`, `note`, `barrier`) сохранены в свойствах feature и могут использоваться для UI или будущих overrides.
 
 ---
 
