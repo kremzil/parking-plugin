@@ -187,8 +187,9 @@
       return;
     }
     if (!_map){
-      _map = L.map('map-frame').setView([lat,lng], 18);
+      _map = L.map('map-frame', { attributionControl: false }).setView([lat,lng], 18);
       _map.on('click', function(e){ if(_pickActive){ _pickActive=false; afterPosition(+e.latlng.lat.toFixed(6), +e.latlng.lng.toFixed(6)); setHelpLL(e.latlng.lat, e.latlng.lng, 'manual'); const el = document.getElementById('map-frame'); if (el) el.style.cursor=''; } });
+      L.control.attribution({ prefix: false }).addTo(_map);
       L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         maxZoom: 19, attribution: '&copy; OpenStreetMap contributors'
       }).addTo(_map);
