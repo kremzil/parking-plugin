@@ -9,6 +9,7 @@ class ZP_EasyPark_Integration {
   const OPT_SMARTHUB_URL = 'zp_easypark_smart_hub_url';
   const OPT_SMARTHUB_USERNAME = 'zp_easypark_smart_hub_username';
   const OPT_SMARTHUB_PASSWORD = 'zp_easypark_smart_hub_password';
+  const DEFAULT_SMARTHUB_URL = 'https://kosice-staging.parkinghub.net/rest/resources/';
 
   const OPT_PERMIT_ENABLED = 'zp_easypark_permit_enabled';
   const OPT_PERMIT_ENV = 'zp_easypark_permit_env';
@@ -94,8 +95,8 @@ class ZP_EasyPark_Integration {
       <tr>
         <th scope="row"><label for="<?php echo esc_attr(self::OPT_SMARTHUB_URL); ?>">Endpoint URL</label></th>
         <td>
-          <input name="<?php echo esc_attr(self::OPT_SMARTHUB_URL); ?>" id="<?php echo esc_attr(self::OPT_SMARTHUB_URL); ?>" type="url" class="regular-text code" value="<?php echo esc_attr(get_option(self::OPT_SMARTHUB_URL, '')); ?>">
-          <p class="description">Napr. <code>https://cityname-staging.parkinghub.net/rest/resources/external-api/parkings/import</code></p>
+          <input name="<?php echo esc_attr(self::OPT_SMARTHUB_URL); ?>" id="<?php echo esc_attr(self::OPT_SMARTHUB_URL); ?>" type="url" class="regular-text code" value="<?php echo esc_attr(get_option(self::OPT_SMARTHUB_URL, self::DEFAULT_SMARTHUB_URL)); ?>">
+          <p class="description">Môžete zadať base URL <code><?php echo esc_html(self::DEFAULT_SMARTHUB_URL); ?></code> alebo celý import endpoint.</p>
         </td>
       </tr>
       <tr>
@@ -158,8 +159,9 @@ class ZP_EasyPark_Integration {
     if (!self::is_smart_hub_enabled()) return;
 
     $payload = self::build_smart_hub_payload($order_data, $payment_id, $transaction_id);
-    $status = self::is_smart_hub_ready() ? 'queued' : 'awaiting_config';
-    $error = self::is_smart_hub_ready() ? null : self::build_smart_hub_readiness_error($payload);
+    $ready = self::is_smart_hub_ready() && !empty($payload['areaNo']) && !empty($payload['licenseNumber']);
+    $status = $ready ? 'queued' : 'awaiting_config';
+    $error = $ready ? null : self::build_smart_hub_readiness_error($payload);
 
     self::upsert_sync_item([
       'integration' => 'smart_hub_parking',
@@ -174,6 +176,64 @@ class ZP_EasyPark_Integration {
       'response_payload' => null,
       'synced_at' => null,
     ]);
+
+    if (!$ready) return;
+
+    $result = self::send_smart_hub_parking($payload);
+    self::upsert_sync_item([
+      'integration' => 'smart_hub_parking',
+      'object_type' => 'parking',
+      'object_key' => $payload['externalParkingId'],
+      'transaction_id' => intval($transaction_id),
+      'external_id' => $payload['externalParkingId'],
+      'status' => $result['success'] ? 'synced' : 'failed',
+      'attempt_count' => 1,
+      'last_error' => $result['success'] ? null : ($result['error'] ?? 'Smart HUB request failed'),
+      'request_payload' => wp_json_encode($payload),
+      'response_payload' => isset($result['response']) ? wp_json_encode($result['response']) : null,
+      'synced_at' => $result['success'] ? current_time('mysql') : null,
+    ]);
+  }
+
+  public static function send_smart_hub_parking($payload){
+    $url = self::get_smart_hub_import_url();
+    $username = (string) get_option(self::OPT_SMARTHUB_USERNAME, '');
+    $password = (string) get_option(self::OPT_SMARTHUB_PASSWORD, '');
+    if (!$url || !$username || !$password) {
+      return ['success' => false, 'error' => 'Smart HUB credentials are incomplete'];
+    }
+
+    $response = wp_remote_post($url, [
+      'timeout' => 20,
+      'headers' => [
+        'Authorization' => 'Basic ' . base64_encode($username . ':' . $password),
+        'Content-Type' => 'application/json',
+      ],
+      'body' => wp_json_encode($payload),
+    ]);
+
+    if (is_wp_error($response)) {
+      return ['success' => false, 'error' => $response->get_error_message()];
+    }
+
+    $code = intval(wp_remote_retrieve_response_code($response));
+    $body = (string) wp_remote_retrieve_body($response);
+    $json = json_decode($body, true);
+    $status = is_array($json) && isset($json['status']) ? (string) $json['status'] : '';
+    $ok = ($code >= 200 && $code < 300);
+    if ($status && strtoupper($status) !== 'SUCCESS_OK') {
+      $ok = false;
+    }
+
+    return [
+      'success' => $ok,
+      'error' => $ok ? null : ('Smart HUB HTTP ' . $code . ($status ? ' status ' . $status : '')),
+      'response' => [
+        'http_code' => $code,
+        'status' => $status ?: null,
+        'body' => $json ?: $body,
+      ],
+    ];
   }
 
   public static function lookup_permit_by_plate($license_plate){
@@ -201,7 +261,16 @@ class ZP_EasyPark_Integration {
 
   public static function is_smart_hub_ready(){
     if (!self::is_smart_hub_enabled()) return false;
-    return (bool) (get_option(self::OPT_SMARTHUB_URL, '') && get_option(self::OPT_SMARTHUB_USERNAME, '') && get_option(self::OPT_SMARTHUB_PASSWORD, ''));
+    return (bool) (get_option(self::OPT_SMARTHUB_URL, self::DEFAULT_SMARTHUB_URL) && get_option(self::OPT_SMARTHUB_USERNAME, '') && get_option(self::OPT_SMARTHUB_PASSWORD, ''));
+  }
+
+  private static function get_smart_hub_import_url(){
+    $url = trim((string) get_option(self::OPT_SMARTHUB_URL, self::DEFAULT_SMARTHUB_URL));
+    if (!$url) return '';
+    $url = rtrim($url, '/');
+    if (preg_match('~/external-api/parkings/import$~', $url)) return $url;
+    if (preg_match('~/rest/resources$~', $url)) return $url . '/external-api/parkings/import';
+    return $url;
   }
 
   public static function is_permit_lookup_enabled(){
@@ -265,7 +334,7 @@ class ZP_EasyPark_Integration {
 
   private static function build_smart_hub_readiness_error($payload){
     $missing = [];
-    if (!get_option(self::OPT_SMARTHUB_URL, '')) $missing[] = 'endpoint URL';
+    if (!get_option(self::OPT_SMARTHUB_URL, self::DEFAULT_SMARTHUB_URL)) $missing[] = 'endpoint URL';
     if (!get_option(self::OPT_SMARTHUB_USERNAME, '')) $missing[] = 'Basic Auth username';
     if (!get_option(self::OPT_SMARTHUB_PASSWORD, '')) $missing[] = 'Basic Auth password';
     if (empty($payload['areaNo'])) $missing[] = 'area mapping for zone';
@@ -289,39 +358,44 @@ class ZP_EasyPark_Integration {
   private static function get_default_area_mapping_json(){
     return wp_json_encode([
       'A1' => [
-        'smart_hub_area_no' => null,
-        'permit_parkingarea_no' => null,
+        'smart_hub_area_no' => 1,
+        'permit_parkingarea_no' => 1,
+        'bonus_card_area_no' => 11,
         'area_country_code' => 'SK',
         'car_country_code' => 'SK',
         'sub_type' => 'NORMAL_TIME',
       ],
       'A2' => [
-        'smart_hub_area_no' => null,
-        'permit_parkingarea_no' => null,
+        'smart_hub_area_no' => 2,
+        'permit_parkingarea_no' => 2,
+        'bonus_card_area_no' => 12,
         'area_country_code' => 'SK',
         'car_country_code' => 'SK',
         'sub_type' => 'NORMAL_TIME',
       ],
       'BN' => [
-        'smart_hub_area_no' => null,
-        'permit_parkingarea_no' => null,
+        'smart_hub_area_no' => 3,
+        'permit_parkingarea_no' => 3,
+        'bonus_card_area_no' => 13,
         'area_country_code' => 'SK',
         'car_country_code' => 'SK',
         'sub_type' => 'NORMAL_TIME',
       ],
       'N' => [
-        'smart_hub_area_no' => null,
-        'permit_parkingarea_no' => null,
+        'smart_hub_area_no' => 4,
+        'permit_parkingarea_no' => 4,
+        'bonus_card_area_no' => 14,
         'area_country_code' => 'SK',
         'car_country_code' => 'SK',
         'sub_type' => 'NORMAL_TIME',
       ],
       'B' => [
-        'smart_hub_area_no' => null,
-        'permit_parkingarea_no' => null,
+        'smart_hub_area_no' => 5,
+        'permit_parkingarea_no' => 5,
+        'bonus_card_area_no' => 15,
         'area_country_code' => 'SK',
         'car_country_code' => 'SK',
-        'sub_type' => 'RESIDENTIAL_BUCKET',
+        'sub_type' => 'NORMAL_TIME',
       ],
     ], JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
   }
