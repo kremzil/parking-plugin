@@ -913,6 +913,14 @@ class Zaparkuj_WP_045 {
       self::SLUG . '-settings',
       [__CLASS__, 'settings_page']
     );
+    add_submenu_page(
+      self::SLUG,
+      'EasyPark Sync',
+      'EasyPark Sync',
+      'manage_options',
+      self::SLUG . '-easypark-sync',
+      ['ZP_EasyPark_Integration', 'render_sync_page']
+    );
   }
   public static function register_settings(){
     $group = self::SLUG . '-settings';

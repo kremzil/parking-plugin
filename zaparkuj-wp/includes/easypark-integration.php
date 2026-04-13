@@ -414,6 +414,129 @@ class ZP_EasyPark_Integration {
     return $wpdb->prefix . 'zp_easypark_sync';
   }
 
+  public static function render_sync_page(){
+    if (!current_user_can('manage_options')) {
+      wp_die(esc_html__('You do not have permission to access this page.'));
+    }
+
+    global $wpdb;
+    $table = self::get_sync_table_name();
+    $status_filter = isset($_GET['status']) ? sanitize_text_field(wp_unslash($_GET['status'])) : '';
+    $allowed_statuses = ['synced', 'failed', 'queued', 'awaiting_config', 'pending'];
+    if ($status_filter && !in_array($status_filter, $allowed_statuses, true)) {
+      $status_filter = '';
+    }
+
+    $where_sql = '1=1';
+    if ($status_filter) {
+      $where_sql = $wpdb->prepare('status = %s', $status_filter);
+    }
+
+    $items = $wpdb->get_results(
+      "SELECT * FROM $table WHERE $where_sql ORDER BY updated_at DESC, id DESC LIMIT 50"
+    );
+    ?>
+    <div class="wrap">
+      <h1>EasyPark Sync</h1>
+      <p class="description">Posledné odpovede zo Smart HUB / Permit HUB integrácií. Citlivé údaje Basic Auth sa sem neukladajú.</p>
+
+      <form method="get" style="margin: 16px 0;">
+        <input type="hidden" name="page" value="zaparkuj-wp-easypark-sync">
+        <select name="status">
+          <option value="">Všetky stavy</option>
+          <option value="synced" <?php selected($status_filter, 'synced'); ?>>Synced</option>
+          <option value="failed" <?php selected($status_filter, 'failed'); ?>>Failed</option>
+          <option value="queued" <?php selected($status_filter, 'queued'); ?>>Queued</option>
+          <option value="awaiting_config" <?php selected($status_filter, 'awaiting_config'); ?>>Awaiting config</option>
+          <option value="pending" <?php selected($status_filter, 'pending'); ?>>Pending</option>
+        </select>
+        <button type="submit" class="button">Filtrovať</button>
+        <?php if ($status_filter): ?>
+          <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=zaparkuj-wp-easypark-sync')); ?>">Resetovať</a>
+        <?php endif; ?>
+      </form>
+
+      <table class="wp-list-table widefat fixed striped">
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Dátum</th>
+            <th>Integrácia</th>
+            <th>Objekt</th>
+            <th>Objednávka</th>
+            <th>Stav</th>
+            <th>Pokusy</th>
+            <th>Chyba</th>
+            <th>Odpoveď servera</th>
+          </tr>
+        </thead>
+        <tbody>
+          <?php if (empty($items)): ?>
+            <tr><td colspan="9">Žiadne záznamy</td></tr>
+          <?php else: ?>
+            <?php foreach ($items as $item): ?>
+              <tr>
+                <td><?php echo esc_html($item->id); ?></td>
+                <td>
+                  <strong><?php echo esc_html($item->updated_at); ?></strong><br>
+                  <small>Created: <?php echo esc_html($item->created_at); ?></small><br>
+                  <small>Synced: <?php echo esc_html($item->synced_at ?: '-'); ?></small>
+                </td>
+                <td><?php echo esc_html($item->integration); ?></td>
+                <td>
+                  <strong><?php echo esc_html($item->object_type); ?></strong><br>
+                  <small><?php echo esc_html($item->object_key); ?></small>
+                </td>
+                <td><?php echo esc_html($item->transaction_id ?: '-'); ?></td>
+                <td><?php echo wp_kses_post(self::render_status_badge($item->status)); ?></td>
+                <td><?php echo esc_html($item->attempt_count); ?></td>
+                <td><?php echo esc_html($item->last_error ?: '-'); ?></td>
+                <td>
+                  <details>
+                    <summary>Response</summary>
+                    <pre style="max-height:220px;overflow:auto;white-space:pre-wrap;"><?php echo esc_html(self::format_payload_for_display($item->response_payload)); ?></pre>
+                  </details>
+                  <details>
+                    <summary>Request</summary>
+                    <pre style="max-height:220px;overflow:auto;white-space:pre-wrap;"><?php echo esc_html(self::format_payload_for_display($item->request_payload)); ?></pre>
+                  </details>
+                </td>
+              </tr>
+            <?php endforeach; ?>
+          <?php endif; ?>
+        </tbody>
+      </table>
+    </div>
+    <?php
+  }
+
+  private static function render_status_badge($status){
+    $colors = [
+      'synced' => '#28a745',
+      'failed' => '#dc3545',
+      'queued' => '#0d6efd',
+      'awaiting_config' => '#ffc107',
+      'pending' => '#6c757d',
+    ];
+    $color = $colors[$status] ?? '#6c757d';
+    $text_color = $status === 'awaiting_config' ? '#000' : '#fff';
+    return sprintf(
+      '<span style="display:inline-block;background:%s;color:%s;padding:3px 8px;border-radius:3px;font-weight:600;">%s</span>',
+      esc_attr($color),
+      esc_attr($text_color),
+      esc_html($status)
+    );
+  }
+
+  private static function format_payload_for_display($payload){
+    if (!$payload) return '-';
+    $decoded = json_decode((string) $payload, true);
+    if (json_last_error() === JSON_ERROR_NONE) {
+      return wp_json_encode($decoded, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    }
+    return (string) $payload;
+  }
+
   private static function upsert_sync_item($data){
     global $wpdb;
     $table = self::get_sync_table_name();
