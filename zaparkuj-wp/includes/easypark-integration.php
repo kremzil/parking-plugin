@@ -156,6 +156,8 @@ class ZP_EasyPark_Integration {
   <?php }
 
   public static function handle_payment_completed($order_data, $payment_id, $transaction_id){
+    if (!self::is_smart_hub_enabled()) return;
+
     $payload = self::build_smart_hub_payload($order_data, $payment_id, $transaction_id);
     $ready = self::is_smart_hub_ready() && !empty($payload['areaNo']) && !empty($payload['licenseNumber']);
     $status = $ready ? 'queued' : 'awaiting_config';
@@ -332,7 +334,6 @@ class ZP_EasyPark_Integration {
 
   private static function build_smart_hub_readiness_error($payload){
     $missing = [];
-    if (!self::is_smart_hub_enabled()) $missing[] = 'Smart HUB enabled checkbox';
     if (!get_option(self::OPT_SMARTHUB_URL, self::DEFAULT_SMARTHUB_URL)) $missing[] = 'endpoint URL';
     if (!get_option(self::OPT_SMARTHUB_USERNAME, '')) $missing[] = 'Basic Auth username';
     if (!get_option(self::OPT_SMARTHUB_PASSWORD, '')) $missing[] = 'Basic Auth password';
@@ -438,7 +439,6 @@ class ZP_EasyPark_Integration {
     <div class="wrap">
       <h1>EasyPark Sync</h1>
       <p class="description">Posledné odpovede zo Smart HUB / Permit HUB integrácií. Citlivé údaje Basic Auth sa sem neukladajú.</p>
-      <p class="description">Záznam sa vytvorí až po úspešnej platbe Barion. Samotná čakajúca objednávka sa do EasyPark Sync neposiela.</p>
 
       <form method="get" style="margin: 16px 0;">
         <input type="hidden" name="page" value="zaparkuj-wp-easypark-sync">
