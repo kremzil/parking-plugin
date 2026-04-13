@@ -15,6 +15,7 @@ class ZP_EasyPark_Integration {
   const OPT_PERMIT_ENV = 'zp_easypark_permit_env';
   const OPT_PERMIT_URL = 'zp_easypark_permit_url';
   const OPT_PERMIT_REFRESH_TOKEN = 'zp_easypark_permit_refresh_token';
+  const DEFAULT_PERMIT_URL = 'https://external-gw-staging.easyparksystem.net/api';
 
   const OPT_AREA_MAPPING = 'zp_easypark_area_mapping_json';
 
@@ -72,7 +73,7 @@ class ZP_EasyPark_Integration {
 
   public static function render_settings_fields(){ ?>
     <h2>EasyPark integrácie</h2>
-    <p class="description">Príprava na budúce pripojenie Permit HUB a Smart HUB. Reálne volania sa nespúšťajú, kým integrácie výslovne nepovolíte a nenastavíte prístupy.</p>
+    <p class="description">Nastavenie pripojenia Permit HUB a Smart HUB. Reálne volania sa nespúšťajú, kým integrácie výslovne nepovolíte a nenastavíte prístupy.</p>
 
     <h3>Smart HUB import parkovaní</h3>
     <table class="form-table" role="presentation">
@@ -114,7 +115,7 @@ class ZP_EasyPark_Integration {
       <tr>
         <th scope="row"><label for="<?php echo esc_attr(self::OPT_PERMIT_ENABLED); ?>">Zapnúť Permit HUB</label></th>
         <td>
-          <label><input name="<?php echo esc_attr(self::OPT_PERMIT_ENABLED); ?>" id="<?php echo esc_attr(self::OPT_PERMIT_ENABLED); ?>" type="checkbox" value="1" <?php checked((bool) get_option(self::OPT_PERMIT_ENABLED, false)); ?>> Povoliť budúcu verifikáciu permitov podľa ŠPZ</label>
+          <label><input name="<?php echo esc_attr(self::OPT_PERMIT_ENABLED); ?>" id="<?php echo esc_attr(self::OPT_PERMIT_ENABLED); ?>" type="checkbox" value="1" <?php checked((bool) get_option(self::OPT_PERMIT_ENABLED, false)); ?>> Povoliť verifikáciu permitov podľa ŠPZ</label>
         </td>
       </tr>
       <tr>
@@ -130,15 +131,15 @@ class ZP_EasyPark_Integration {
       <tr>
         <th scope="row"><label for="<?php echo esc_attr(self::OPT_PERMIT_URL); ?>">Base API URL</label></th>
         <td>
-          <input name="<?php echo esc_attr(self::OPT_PERMIT_URL); ?>" id="<?php echo esc_attr(self::OPT_PERMIT_URL); ?>" type="url" class="regular-text code" value="<?php echo esc_attr(get_option(self::OPT_PERMIT_URL, '')); ?>">
-          <p class="description">Napr. <code>https://external-gw-staging.easyparksystem.net/api</code></p>
+          <input name="<?php echo esc_attr(self::OPT_PERMIT_URL); ?>" id="<?php echo esc_attr(self::OPT_PERMIT_URL); ?>" type="url" class="regular-text code" value="<?php echo esc_attr(get_option(self::OPT_PERMIT_URL, self::DEFAULT_PERMIT_URL)); ?>">
+          <p class="description">Napr. <code><?php echo esc_html(self::DEFAULT_PERMIT_URL); ?></code></p>
         </td>
       </tr>
       <tr>
         <th scope="row"><label for="<?php echo esc_attr(self::OPT_PERMIT_REFRESH_TOKEN); ?>">Refresh token</label></th>
         <td>
           <input name="<?php echo esc_attr(self::OPT_PERMIT_REFRESH_TOKEN); ?>" id="<?php echo esc_attr(self::OPT_PERMIT_REFRESH_TOKEN); ?>" type="password" class="regular-text" value="<?php echo esc_attr(get_option(self::OPT_PERMIT_REFRESH_TOKEN, '')); ?>">
-          <p class="description">Použije sa pre budúci JWT login a lookup <code>/permit/license-plate/{licenseplate}</code>.</p>
+          <p class="description">Použije sa pre JWT login a lookup <code>/permit/license-plate/{licenseplate}</code>.</p>
         </td>
       </tr>
     </table>
@@ -247,7 +248,88 @@ class ZP_EasyPark_Integration {
     if (!self::is_permit_lookup_ready()) {
       return new WP_Error('permit_lookup_not_ready', 'Permit HUB lookup is not configured');
     }
-    return new WP_Error('permit_lookup_not_implemented', 'Permit HUB transport layer is not implemented yet');
+
+    $token_result = self::get_permit_id_token();
+    if (is_wp_error($token_result)) {
+      return $token_result;
+    }
+
+    $url = self::get_permit_license_plate_url($plate);
+    $response = wp_remote_get($url, [
+      'timeout' => 20,
+      'headers' => [
+        'Content-Type' => 'application/json',
+        'X-Authorization' => 'Bearer ' . $token_result['idToken'],
+      ],
+    ]);
+
+    if (is_wp_error($response)) {
+      return $response;
+    }
+
+    $code = intval(wp_remote_retrieve_response_code($response));
+    $body = trim((string) wp_remote_retrieve_body($response));
+    $json = $body !== '' ? json_decode($body, true) : null;
+    $valid_json = $body === '' || json_last_error() === JSON_ERROR_NONE;
+    $success = $code >= 200 && $code < 300 && $valid_json;
+
+    return [
+      'success' => $success,
+      'found' => is_array($json) && !empty($json),
+      'licensePlate' => $plate,
+      'http_code' => $code,
+      'error' => $success ? null : ('Permit HUB HTTP ' . $code . ($valid_json ? '' : ' invalid JSON response')),
+      'response' => [
+        'http_code' => $code,
+        'body' => $valid_json ? $json : $body,
+      ],
+    ];
+  }
+
+  public static function run_permit_lookup_test($license_plate){
+    $plate = self::normalize_license_plate($license_plate);
+    if (!$plate) {
+      return new WP_Error('invalid_plate', 'Invalid license plate');
+    }
+
+    $request_payload = [
+      'licensePlate' => $plate,
+      'endpoint' => self::get_permit_license_plate_url($plate),
+    ];
+
+    $result = self::lookup_permit_by_plate($plate);
+    if (is_wp_error($result)) {
+      self::upsert_sync_item([
+        'integration' => 'permit_hub_lookup',
+        'object_type' => 'permit',
+        'object_key' => $plate,
+        'transaction_id' => null,
+        'external_id' => $plate,
+        'status' => 'failed',
+        'attempt_count' => 1,
+        'last_error' => $result->get_error_message(),
+        'request_payload' => wp_json_encode($request_payload),
+        'response_payload' => null,
+        'synced_at' => null,
+      ]);
+      return $result;
+    }
+
+    self::upsert_sync_item([
+      'integration' => 'permit_hub_lookup',
+      'object_type' => 'permit',
+      'object_key' => $plate,
+      'transaction_id' => null,
+      'external_id' => $plate,
+      'status' => $result['success'] ? 'synced' : 'failed',
+      'attempt_count' => 1,
+      'last_error' => $result['success'] ? null : ($result['error'] ?? 'Permit HUB lookup failed'),
+      'request_payload' => wp_json_encode($request_payload),
+      'response_payload' => wp_json_encode($result),
+      'synced_at' => $result['success'] ? current_time('mysql') : null,
+    ]);
+
+    return $result;
   }
 
   public static function normalize_license_plate($plate){
@@ -279,7 +361,48 @@ class ZP_EasyPark_Integration {
 
   public static function is_permit_lookup_ready(){
     if (!self::is_permit_lookup_enabled()) return false;
-    return (bool) (get_option(self::OPT_PERMIT_URL, '') && get_option(self::OPT_PERMIT_REFRESH_TOKEN, ''));
+    return (bool) (get_option(self::OPT_PERMIT_URL, self::DEFAULT_PERMIT_URL) && get_option(self::OPT_PERMIT_REFRESH_TOKEN, ''));
+  }
+
+  private static function get_permit_id_token(){
+    $refresh_token = trim((string) get_option(self::OPT_PERMIT_REFRESH_TOKEN, ''));
+    if (!$refresh_token) {
+      return new WP_Error('permit_refresh_token_missing', 'Permit HUB refresh token is missing');
+    }
+
+    $response = wp_remote_post(self::get_permit_base_url() . '/get-jwt', [
+      'timeout' => 20,
+      'headers' => [
+        'Content-Type' => 'application/json',
+      ],
+      'body' => wp_json_encode([
+        'refreshToken' => $refresh_token,
+      ]),
+    ]);
+
+    if (is_wp_error($response)) {
+      return $response;
+    }
+
+    $code = intval(wp_remote_retrieve_response_code($response));
+    $body = (string) wp_remote_retrieve_body($response);
+    $json = json_decode($body, true);
+    if ($code < 200 || $code >= 300 || !is_array($json) || empty($json['idToken'])) {
+      return new WP_Error('permit_jwt_failed', 'Permit HUB JWT request failed with HTTP ' . $code);
+    }
+
+    return [
+      'idToken' => (string) $json['idToken'],
+      'validUntilDate' => isset($json['validUntilDate']) ? (string) $json['validUntilDate'] : null,
+    ];
+  }
+
+  private static function get_permit_base_url(){
+    return rtrim(trim((string) get_option(self::OPT_PERMIT_URL, self::DEFAULT_PERMIT_URL)), '/');
+  }
+
+  private static function get_permit_license_plate_url($plate){
+    return self::get_permit_base_url() . '/permit/license-plate/' . rawurlencode(self::normalize_license_plate($plate));
   }
 
   public static function build_smart_hub_payload($order_data, $payment_id, $transaction_id){
@@ -427,6 +550,29 @@ class ZP_EasyPark_Integration {
       $status_filter = '';
     }
 
+    $permit_lookup_notice = null;
+    if (
+      isset($_POST['zp_easypark_action']) &&
+      sanitize_key(wp_unslash($_POST['zp_easypark_action'])) === 'permit_lookup_test'
+    ) {
+      check_admin_referer('zp_permit_lookup_test');
+      $plate = isset($_POST['license_plate']) ? sanitize_text_field(wp_unslash($_POST['license_plate'])) : '';
+      $lookup_result = self::run_permit_lookup_test($plate);
+      if (is_wp_error($lookup_result)) {
+        $permit_lookup_notice = [
+          'class' => 'notice notice-error',
+          'message' => 'Permit HUB lookup zlyhal: ' . $lookup_result->get_error_message(),
+        ];
+      } else {
+        $permit_lookup_notice = [
+          'class' => $lookup_result['success'] ? 'notice notice-success' : 'notice notice-error',
+          'message' => $lookup_result['success']
+            ? ('Permit HUB lookup dokončený pre ŠPZ ' . $lookup_result['licensePlate'] . '. Výsledok: ' . ($lookup_result['found'] ? 'permit nájdený' : 'permit nenájdený') . '.')
+            : ('Permit HUB lookup zlyhal: ' . ($lookup_result['error'] ?? 'unknown error')),
+        ];
+      }
+    }
+
     $where_sql = '1=1';
     if ($status_filter) {
       $where_sql = $wpdb->prepare('status = %s', $status_filter);
@@ -440,6 +586,21 @@ class ZP_EasyPark_Integration {
       <h1>EasyPark Sync</h1>
       <p class="description">Posledné odpovede zo Smart HUB / Permit HUB integrácií. Citlivé údaje Basic Auth sa sem neukladajú.</p>
 
+      <?php if ($permit_lookup_notice): ?>
+        <div class="<?php echo esc_attr($permit_lookup_notice['class']); ?>"><p><?php echo esc_html($permit_lookup_notice['message']); ?></p></div>
+      <?php endif; ?>
+
+      <h2>Permit HUB test podľa ŠPZ</h2>
+      <form method="post" style="margin: 16px 0;">
+        <?php wp_nonce_field('zp_permit_lookup_test'); ?>
+        <input type="hidden" name="zp_easypark_action" value="permit_lookup_test">
+        <label for="zp-permit-license-plate" class="screen-reader-text">ŠPZ</label>
+        <input id="zp-permit-license-plate" name="license_plate" type="text" class="regular-text" value="BK777KE" placeholder="BK777KE">
+        <button type="submit" class="button button-primary">Overiť Permit HUB</button>
+        <p class="description">Použije sa endpoint <code>/permit/license-plate/{licenseplate}</code>. Refresh token ani idToken sa do logu neukladajú.</p>
+      </form>
+
+      <h2>Log integrácií</h2>
       <form method="get" style="margin: 16px 0;">
         <input type="hidden" name="page" value="zaparkuj-wp-easypark-sync">
         <select name="status">
